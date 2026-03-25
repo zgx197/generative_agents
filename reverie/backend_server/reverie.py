@@ -23,10 +23,12 @@ import json
 import numpy
 import datetime
 import pickle
+import io
 import time
 import math
 import os
 import shutil
+import sys
 import threading
 import traceback
 
@@ -40,6 +42,52 @@ from utils import *
 from maze import *
 from persona.persona import *
 from persona.prompt_template.gpt_structure import *
+
+
+class _TeeStream(io.TextIOBase):
+  def __init__(self, primary_stream, mirror_stream):
+    self._primary_stream = primary_stream
+    self._mirror_stream = mirror_stream
+
+  @property
+  def encoding(self):
+    return getattr(self._primary_stream, "encoding", "utf-8")
+
+  def write(self, data):
+    if not isinstance(data, str):
+      data = str(data)
+    self._primary_stream.write(data)
+    self._primary_stream.flush()
+    self._mirror_stream.write(data)
+    self._mirror_stream.flush()
+    return len(data)
+
+  def flush(self):
+    self._primary_stream.flush()
+    self._mirror_stream.flush()
+
+  def isatty(self):
+    return bool(getattr(self._primary_stream, "isatty", lambda: False)())
+
+
+def _install_process_logging():
+  log_path = os.getenv("GA_BACKEND_LOG_PATH")
+  if not log_path:
+    return
+  if getattr(sys, "_ga_process_logging_installed", False):
+    return
+
+  log_dir = os.path.dirname(log_path)
+  if log_dir:
+    os.makedirs(log_dir, exist_ok=True)
+
+  log_stream = open(log_path, "a", encoding="utf-8", buffering=1)
+  sys.stdout = _TeeStream(sys.stdout, log_stream)
+  sys.stderr = _TeeStream(sys.stderr, log_stream)
+  sys._ga_process_logging_installed = True
+
+
+_install_process_logging()
 
 ##############################################################################
 #                                  REVERIE                                   #
@@ -962,7 +1010,6 @@ if __name__ == '__main__':
 
   rs = ReverieServer(origin, target)
   rs.open_server()
-
 
 
 
