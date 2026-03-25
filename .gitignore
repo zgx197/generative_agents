@@ -66,6 +66,8 @@ coverage.xml
 *.log
 logs/
 local_settings.py
+environment/frontend_server/db.sqlite3
+environment/frontend_server/temp_storage/*.json
 environment/frontend_server/storage/_ai_audit/
 environment/frontend_server/storage/local-*/
 environment/frontend_server/storage/my-test-run/
