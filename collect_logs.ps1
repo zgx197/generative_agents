@@ -130,10 +130,15 @@ $ReportLines.Add(("Logs dir: {0}" -f $LogsDir))
 $ReportLines.Add("")
 
 $FrontendPath = Join-Path $LogsDir "frontend.log"
+$FrontendRuntimePath = Join-Path $LogsDir "frontend.runtime.log"
 $BackendPath = Join-Path $LogsDir "backend.log"
 $BackendRuntimePath = Join-Path $LogsDir "backend.runtime.log"
 
 foreach ($Line in (Build-LogSummary -Name "frontend.log" -Path $FrontendPath)) {
+  $ReportLines.Add($Line)
+}
+
+foreach ($Line in (Build-LogSummary -Name "frontend.runtime.log" -Path $FrontendRuntimePath)) {
   $ReportLines.Add($Line)
 }
 

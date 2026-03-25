@@ -12,6 +12,19 @@ from global_methods import *
 from path_finder import *
 from utils import *
 
+
+def _resolve_address_key(plan, address_tiles):
+  if plan in address_tiles:
+    return plan
+
+  lowered_plan = plan.casefold()
+  for key in address_tiles.keys():
+    if key.casefold() == lowered_plan:
+      return key
+
+  return None
+
+
 def execute(persona, maze, personas, plan): 
   """
   Given a plan (action's string address), we execute the plan (actually 
@@ -88,10 +101,19 @@ def execute(persona, maze, personas, plan):
       # Retrieve the target addresses. Again, plan is an action address in its
       # string form. <maze.address_tiles> takes this and returns candidate 
       # coordinates. 
-      if plan not in maze.address_tiles: 
-        maze.address_tiles["Johnson Park:park:park garden"] #ERRORRRRRRR
-      else: 
-        target_tiles = maze.address_tiles[plan]
+      resolved_plan = _resolve_address_key(plan, maze.address_tiles)
+      if resolved_plan is None:
+        candidate_keys = []
+        for key in maze.address_tiles.keys():
+          if key.startswith(":".join(plan.split(":")[:2])):
+            candidate_keys += [key]
+          if len(candidate_keys) >= 5:
+            break
+        raise KeyError(
+          f"Unknown action address: {plan}. "
+          f"Candidate addresses: {candidate_keys}"
+        )
+      target_tiles = maze.address_tiles[resolved_plan]
 
     # There are sometimes more than one tile returned from this (e.g., a tabe
     # may stretch many coordinates). So, we sample a few here. And from that 
@@ -157,7 +179,6 @@ def execute(persona, maze, personas, plan):
 
   execution = ret, persona.scratch.act_pronunciatio, description
   return execution
-
 
 
 

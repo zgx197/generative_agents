@@ -15,10 +15,10 @@ import os
 
 # Build paths inside the project like this: os.path.join(BASE_DIR, ...)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-ROOT_DIR = os.path.dirname(BASE_DIR)
+ROOT_DIR = os.path.dirname(os.path.dirname(BASE_DIR))
 LOG_DIR = os.path.join(ROOT_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
-FRONTEND_LOG_FILE = os.path.join(LOG_DIR, "frontend.log")
+FRONTEND_LOG_FILE = os.path.join(LOG_DIR, "frontend.runtime.log")
 
 
 # Quick-start development settings - unsuitable for production
@@ -158,10 +158,8 @@ LOGGING = {
         },
         'frontend_file': {
             'level': 'INFO',
-            'class': 'logging.handlers.RotatingFileHandler',
+            'class': 'logging.FileHandler',
             'filename': FRONTEND_LOG_FILE,
-            'maxBytes': 2 * 1024 * 1024,
-            'backupCount': 3,
             'encoding': 'utf-8',
             'formatter': 'standard',
         },
@@ -196,7 +194,6 @@ LOGGING = {
 
 # CORS_ORIGIN_ALLOW_ALL = True
 # CORS_ALLOW_CREDENTIALS = False
-
 
 
 

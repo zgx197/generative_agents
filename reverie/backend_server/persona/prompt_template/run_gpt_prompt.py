@@ -16,6 +16,70 @@ from global_methods import *
 from persona.prompt_template.gpt_structure import *
 from persona.prompt_template.print_prompt import *
 
+
+def _coerce_choice_from_response(raw_response, allowed_options, fallback=None):
+  allowed = [option.strip() for option in allowed_options if option and option.strip()]
+  if not allowed:
+    return fallback
+
+  text = str(raw_response or "").strip()
+  if not text:
+    return fallback
+
+  candidates = []
+
+  def add_candidate(value):
+    if value is None:
+      return
+    cleaned = str(value).strip()
+    if not cleaned:
+      return
+    candidates.append(cleaned)
+
+  add_candidate(text)
+
+  lowered_text = text.lower()
+  if "answer:" in lowered_text:
+    add_candidate(text.split(":", 1)[-1])
+  if '"output"' in lowered_text or "'output'" in lowered_text:
+    try:
+      parsed = ast.literal_eval(text)
+      if isinstance(parsed, dict):
+        add_candidate(parsed.get("output"))
+    except Exception:
+      pass
+
+  for fragment in re.split(r'[\n\r]+', text):
+    add_candidate(fragment)
+  for fragment in re.split(r'[{}"\']', text):
+    add_candidate(fragment)
+
+  normalized_candidates = []
+  seen = set()
+  for candidate in candidates:
+    candidate = candidate.strip().strip(":").strip("-").strip()
+    if not candidate:
+      continue
+    lowered = candidate.casefold()
+    if lowered in seen:
+      continue
+    normalized_candidates.append(candidate)
+    seen.add(lowered)
+
+  allowed_sorted = sorted(allowed, key=len, reverse=True)
+  for candidate in normalized_candidates:
+    candidate_folded = candidate.casefold()
+    for option in allowed_sorted:
+      option_folded = option.casefold()
+      if candidate_folded == option_folded:
+        return option
+      if option_folded in candidate_folded:
+        return option
+      if candidate_folded in option_folded and len(candidate_folded) >= 3:
+        return option
+
+  return fallback
+
 def get_random_alphanumeric(i=6, j=6): 
   """
   Returns a random alpha numeric strength that has the length of somewhere
@@ -629,9 +693,11 @@ def run_gpt_prompt_action_sector(action_description,
                                    __func_validate, __func_clean_up)
   y = f"{maze.access_tile(persona.scratch.curr_tile)['world']}"
   x = [i.strip() for i in persona.s_mem.get_str_accessible_sectors(y).split(",")]
-  if output not in x: 
-    # output = random.choice(x)
-    output = persona.scratch.living_area.split(":")[1]
+  output = _coerce_choice_from_response(
+    output,
+    x,
+    fallback=persona.scratch.living_area.split(":")[1],
+  )
 
   print ("DEBUG", random.choice(x), "------", output)
 
@@ -724,11 +790,11 @@ def run_gpt_prompt_action_arena(action_description,
   fail_safe = get_fail_safe()
   output = safe_generate_response(prompt, gpt_param, 5, fail_safe,
                                    __func_validate, __func_clean_up)
-  print (output)
-  # y = f"{act_world}:{act_sector}"
-  # x = [i.strip() for i in persona.s_mem.get_str_accessible_sector_arenas(y).split(",")]
-  # if output not in x: 
-  #   output = random.choice(x)
+  y = f"{act_world}:{act_sector}"
+  x = [i.strip() for i in persona.s_mem.get_str_accessible_sector_arenas(y).split(",") if i.strip()]
+  current_arena = maze.access_tile(persona.scratch.curr_tile)["arena"]
+  arena_fallback = current_arena if current_arena in x else (x[0] if x else "main room")
+  output = _coerce_choice_from_response(output, x, fallback=arena_fallback)
 
   if debug or verbose: 
     print_run_prompts(prompt_template, persona, gpt_param, 
@@ -785,8 +851,11 @@ def run_gpt_prompt_action_game_object(action_description,
                                    __func_validate, __func_clean_up)
 
   x = [i.strip() for i in persona.s_mem.get_str_accessible_arena_game_objects(temp_address).split(",")]
-  if output not in x: 
-    output = random.choice(x)
+  output = _coerce_choice_from_response(
+    output,
+    x,
+    fallback=random.choice(x) if x else "<random>",
+  )
 
   if debug or verbose: 
     print_run_prompts(prompt_template, persona, gpt_param, 
@@ -2924,8 +2993,6 @@ def run_gpt_generate_iterative_chat_utt(maze, init_persona, target_persona, retr
                "temperature": 0, "top_p": 1, "stream": False,
                "frequency_penalty": 0, "presence_penalty": 0, "stop": None}
   return output, [output, prompt, gpt_param, prompt_input, fail_safe]
-
-
 
 
 

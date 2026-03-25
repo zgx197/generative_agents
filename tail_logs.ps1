@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-  [ValidateSet("all", "frontend", "backend", "backend-runtime")]
+  [ValidateSet("all", "frontend", "frontend-runtime", "backend", "backend-runtime")]
   [string]$Target = "all",
   [int]$Lines = 80,
   [switch]$Follow
@@ -41,11 +41,15 @@ if ($Follow -and $Target -eq "all") {
 switch ($Target) {
   "all" {
     Show-LogTail -Name "frontend" -TailCount $Lines
+    Show-LogTail -Name "frontend.runtime" -TailCount $Lines
     Show-LogTail -Name "backend" -TailCount $Lines
     Show-LogTail -Name "backend.runtime" -TailCount $Lines
   }
   "frontend" {
     Show-LogTail -Name "frontend" -TailCount $Lines -WaitForChanges:$Follow
+  }
+  "frontend-runtime" {
+    Show-LogTail -Name "frontend.runtime" -TailCount $Lines -WaitForChanges:$Follow
   }
   "backend" {
     Show-LogTail -Name "backend" -TailCount $Lines -WaitForChanges:$Follow
