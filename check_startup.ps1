@@ -10,6 +10,7 @@ $RepoRoot = Split-Path -Parent $PSCommandPath
 $FrontendDir = Join-Path $RepoRoot "environment\frontend_server"
 $BackendDir = Join-Path $RepoRoot "reverie\backend_server"
 $LogsDir = Join-Path $RepoRoot "logs"
+$AiConfigPath = Join-Path $RepoRoot "config\ai_config.local.json"
 $StorageDir = Join-Path $FrontendDir "storage"
 $WindowsPowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $ScriptPaths = @(
@@ -64,6 +65,23 @@ $ProbeFile = Join-Path $LogsDir "startup_check_probe.tmp"
 Set-Content -Path $ProbeFile -Value "ok" -Encoding utf8
 Remove-Item -LiteralPath $ProbeFile -Force
 
+Write-Host "[check] validating AI config"
+$HasGenericKey = -not [string]::IsNullOrWhiteSpace($env:DASHSCOPE_API_KEY)
+$HasChatKey = -not [string]::IsNullOrWhiteSpace($env:GA_CHAT_API_KEY)
+$HasEmbeddingKey = -not [string]::IsNullOrWhiteSpace($env:GA_EMBEDDING_API_KEY)
+$HasLocalAiConfig = Test-Path $AiConfigPath
+Assert-Condition ($HasLocalAiConfig -or $HasGenericKey -or ($HasChatKey -and $HasEmbeddingKey)) `
+  "AI config missing. Create config\\ai_config.local.json or provide GA_CHAT_API_KEY/GA_EMBEDDING_API_KEY (or DASHSCOPE_API_KEY)."
+if ($HasLocalAiConfig -and -not $HasGenericKey -and -not ($HasChatKey -and $HasEmbeddingKey)) {
+  $AiConfig = Get-Content $AiConfigPath -Raw | ConvertFrom-Json
+  $JsonChatKey = [string]$AiConfig.chat.api_key
+  $JsonEmbeddingKey = [string]$AiConfig.embedding.api_key
+  $HasValidJsonChatKey = (-not [string]::IsNullOrWhiteSpace($JsonChatKey)) -and ($JsonChatKey -notlike "replace-with-*")
+  $HasValidJsonEmbeddingKey = (-not [string]::IsNullOrWhiteSpace($JsonEmbeddingKey)) -and ($JsonEmbeddingKey -notlike "replace-with-*")
+  Assert-Condition ($HasValidJsonChatKey -and $HasValidJsonEmbeddingKey) `
+    "AI config file exists but chat/embedding api_key is still empty or placeholder."
+}
+
 Write-Host "[check] validating forked simulation"
 $ForkedSimPath = Join-Path $StorageDir $ForkedSimulation
 Assert-Condition (Test-Path $ForkedSimPath) "Forked simulation does not exist: $ForkedSimulation"
@@ -99,3 +117,4 @@ Write-Host ("Forked sim      : {0}" -f $ForkedSimulation)
 Write-Host ("Frontend dir    : {0}" -f $FrontendDir)
 Write-Host ("Backend dir     : {0}" -f $BackendDir)
 Write-Host ("Logs dir        : {0}" -f $LogsDir)
+Write-Host ("AI config path  : {0}" -f $AiConfigPath)

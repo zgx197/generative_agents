@@ -65,6 +65,7 @@ coverage.xml
 # Django stuff:
 *.log
 logs/
+config/ai_config.local.json
 local_settings.py
 environment/frontend_server/db.sqlite3
 environment/frontend_server/temp_storage/*.json

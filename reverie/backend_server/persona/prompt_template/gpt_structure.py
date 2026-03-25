@@ -25,6 +25,15 @@ def _setting(name, default=None):
   return globals().get(name, default)
 
 
+def _build_chat_extra_body(chat_provider):
+  extra_body = {}
+  if chat_provider in ("dashscope", "qwen", "aliyun"):
+    extra_body["enable_thinking"] = bool(
+      _setting("chat_enable_thinking", False)
+    )
+  return extra_body
+
+
 def _build_ai_config():
   chat_provider = str(_setting("chat_provider", "openai")).lower()
   chat_api_key = (_setting("chat_api_key", None)
@@ -81,6 +90,7 @@ def _build_ai_config():
       "base_url": chat_base_url,
       "model": default_chat_model,
       "advanced_model": advanced_chat_model,
+      "extra_body": _build_chat_extra_body(chat_provider),
       "timeout_sec": timeout_sec,
       "debug": debug_llm,
     },
@@ -580,7 +590,6 @@ if __name__ == '__main__':
                                  True)
 
   print (output)
-
 
 
 

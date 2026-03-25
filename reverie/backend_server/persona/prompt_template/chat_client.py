@@ -23,6 +23,7 @@ class ChatClient:
     self.base_url = config.get("base_url") or "https://api.openai.com/v1"
     self.default_model = config.get("model") or "gpt-3.5-turbo"
     self.advanced_model = config.get("advanced_model") or self.default_model
+    self.extra_body = dict(config.get("extra_body") or {})
     self.timeout_sec = int(config.get("timeout_sec") or 60)
     self.debug = bool(config.get("debug"))
 
@@ -64,6 +65,7 @@ class ChatClient:
       "model": request_model,
       "messages": [{"role": "user", "content": prompt}],
     }
+    payload.update(self.extra_body)
     if temperature is not None:
       payload["temperature"] = temperature
     if max_tokens is not None:

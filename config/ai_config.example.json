@@ -1,0 +1,29 @@
+{
+  "meta": {
+    "key_owner": "local-json-config"
+  },
+  "chat": {
+    "provider": "qwen",
+    "api_key": "replace-with-your-chat-api-key",
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "model": "qwen3.5-flash",
+    "advanced_model": "qwen3.5-flash",
+    "enable_thinking": false
+  },
+  "embedding": {
+    "provider": "qwen",
+    "api_key": "replace-with-your-embedding-api-key",
+    "base_url": "https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding",
+    "model": "text-embedding-v4",
+    "schema_version": 1,
+    "mixing_policy": "forbid"
+  },
+  "runtime": {
+    "request_timeout_sec": 60,
+    "debug_llm": false,
+    "ai_audit_enabled": true,
+    "ai_audit_dir": "../../environment/frontend_server/storage/_ai_audit",
+    "ai_audit_preview_chars": 160,
+    "debug": false
+  }
+}
