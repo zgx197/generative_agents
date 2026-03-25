@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/2.2/ref/settings/
 """
 
+import importlib.util
 import os
 
 # Build paths inside the project like this: os.path.join(BASE_DIR, ...)
@@ -38,9 +39,13 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'translator',
-    'corsheaders',
-    'storages',
 ]
+
+if importlib.util.find_spec("corsheaders"):
+    INSTALLED_APPS.append('corsheaders')
+
+if importlib.util.find_spec("storages"):
+    INSTALLED_APPS.append('storages')
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
@@ -50,8 +55,10 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
-    'corsheaders.middleware.CorsMiddleware',
 ]
+
+if importlib.util.find_spec("corsheaders"):
+    MIDDLEWARE.append('corsheaders.middleware.CorsMiddleware')
 
 ROOT_URLCONF = 'frontend_server.urls'
 
@@ -130,7 +137,6 @@ STATICFILES_DIRS = (
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(os.path.dirname(BASE_DIR), "media_root")
-
 
 
 

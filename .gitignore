@@ -64,7 +64,14 @@ coverage.xml
 
 # Django stuff:
 *.log
+logs/
 local_settings.py
+environment/frontend_server/storage/_ai_audit/
+environment/frontend_server/storage/local-*/
+environment/frontend_server/storage/my-test-run/
+environment/frontend_server/storage/test_run_1/
+environment/frontend_server/storage/**/embedding_migration_log.jsonl
+environment/frontend_server/storage/**/embeddings.json.bak
 
 # Flask stuff:
 instance/

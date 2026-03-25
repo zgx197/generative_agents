@@ -10,10 +10,15 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/2.2/ref/settings/
 """
 
+import importlib.util
 import os
 
 # Build paths inside the project like this: os.path.join(BASE_DIR, ...)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT_DIR = os.path.dirname(BASE_DIR)
+LOG_DIR = os.path.join(ROOT_DIR, "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+FRONTEND_LOG_FILE = os.path.join(LOG_DIR, "frontend.log")
 
 
 # Quick-start development settings - unsuitable for production
@@ -38,9 +43,13 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'translator',
-    'corsheaders',
-    'storages',
 ]
+
+if importlib.util.find_spec("corsheaders"):
+    INSTALLED_APPS.append('corsheaders')
+
+if importlib.util.find_spec("storages"):
+    INSTALLED_APPS.append('storages')
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
@@ -50,8 +59,10 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
-    'corsheaders.middleware.CorsMiddleware',
 ]
+
+if importlib.util.find_spec("corsheaders"):
+    MIDDLEWARE.append('corsheaders.middleware.CorsMiddleware')
 
 ROOT_URLCONF = 'frontend_server.urls'
 
@@ -131,15 +142,60 @@ MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(os.path.dirname(BASE_DIR), "media_root")
 
 
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'standard': {
+            'format': '%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+        },
+    },
+    'handlers': {
+        'console': {
+            'level': 'WARNING',
+            'class': 'logging.StreamHandler',
+            'formatter': 'standard',
+        },
+        'frontend_file': {
+            'level': 'INFO',
+            'class': 'logging.handlers.RotatingFileHandler',
+            'filename': FRONTEND_LOG_FILE,
+            'maxBytes': 2 * 1024 * 1024,
+            'backupCount': 3,
+            'encoding': 'utf-8',
+            'formatter': 'standard',
+        },
+    },
+    'root': {
+        'handlers': ['console', 'frontend_file'],
+        'level': 'WARNING',
+    },
+    'loggers': {
+        'django': {
+            'handlers': ['console', 'frontend_file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'django.server': {
+            'handlers': ['console', 'frontend_file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'translator': {
+            'handlers': ['console', 'frontend_file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+    },
+}
+
+
 # CORS_ORIGIN_WHITELIST = [
 # 'http://127.0.0.1:8080'
 # ]
 
 # CORS_ORIGIN_ALLOW_ALL = True
 # CORS_ALLOW_CREDENTIALS = False
-
-
-
 
 
 
