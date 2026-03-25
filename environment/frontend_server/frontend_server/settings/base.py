@@ -19,6 +19,8 @@ ROOT_DIR = os.path.dirname(os.path.dirname(BASE_DIR))
 LOG_DIR = os.path.join(ROOT_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 FRONTEND_LOG_FILE = os.path.join(LOG_DIR, "frontend.runtime.log")
+FRONTEND_RUNTIME_LOG_MAX_LINES = int(os.getenv("GA_FRONTEND_RUNTIME_LOG_MAX_LINES", "2000"))
+FRONTEND_RUNTIME_LOG_CHECK_INTERVAL = int(os.getenv("GA_FRONTEND_RUNTIME_LOG_CHECK_INTERVAL", "50"))
 
 
 # Quick-start development settings - unsuitable for production
@@ -158,10 +160,12 @@ LOGGING = {
         },
         'frontend_file': {
             'level': 'INFO',
-            'class': 'logging.FileHandler',
+            'class': 'frontend_server.logging_utils.LineLimitedFileHandler',
             'filename': FRONTEND_LOG_FILE,
             'encoding': 'utf-8',
             'formatter': 'standard',
+            'max_lines': FRONTEND_RUNTIME_LOG_MAX_LINES,
+            'check_interval': FRONTEND_RUNTIME_LOG_CHECK_INTERVAL,
         },
     },
     'root': {
@@ -171,12 +175,12 @@ LOGGING = {
     'loggers': {
         'django': {
             'handlers': ['console', 'frontend_file'],
-            'level': 'INFO',
+            'level': 'WARNING',
             'propagate': False,
         },
         'django.server': {
             'handlers': ['console', 'frontend_file'],
-            'level': 'INFO',
+            'level': 'WARNING',
             'propagate': False,
         },
         'translator': {
@@ -194,7 +198,6 @@ LOGGING = {
 
 # CORS_ORIGIN_ALLOW_ALL = True
 # CORS_ALLOW_CREDENTIALS = False
-
 
 
 

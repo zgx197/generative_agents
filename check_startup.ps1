@@ -13,6 +13,7 @@ $LogsDir = Join-Path $RepoRoot "logs"
 $AiConfigPath = Join-Path $RepoRoot "config\ai_config.local.json"
 $StorageDir = Join-Path $FrontendDir "storage"
 $WindowsPowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+$WindowsTerminal = Get-Command wt -ErrorAction SilentlyContinue
 $ScriptPaths = @(
   (Join-Path $RepoRoot "start_game.ps1"),
   (Join-Path $RepoRoot "run_frontend.ps1"),
@@ -49,6 +50,13 @@ Write-Host "[check] validating workspace paths"
 Assert-Condition (Test-Path $FrontendDir) "Frontend directory not found: $FrontendDir"
 Assert-Condition (Test-Path $BackendDir) "Backend directory not found: $BackendDir"
 Assert-Condition (Test-Path $WindowsPowerShell) "powershell.exe not found: $WindowsPowerShell"
+
+Write-Host "[check] detecting terminal host"
+if ($WindowsTerminal) {
+  Write-Host ("[check] Windows Terminal found: {0}" -f $WindowsTerminal.Source)
+} else {
+  Write-Warning "wt.exe not found. start_game.ps1 will fall back to classic PowerShell windows."
+}
 
 Write-Host "[check] validating startup scripts syntax"
 foreach ($ScriptPath in $ScriptPaths) {
