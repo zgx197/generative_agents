@@ -52,6 +52,11 @@
 	  height: 800,
 	  parent: "game-container",
 	  pixelArt: true,
+	  render: {
+	  	antialias: false,
+	  	pixelArt: true,
+	  	roundPixels: true
+	  },
 	  physics: {
 	    default: "arcade",
 	    arcade: {
@@ -80,9 +85,31 @@
 	// Creating the game instance and setting up the main Phaser variables that  
 	// will be used in it. 
 	const game = new Phaser.Game(config);
-	let cursors;
 	let player;
+	let mainCamera;
+	let uiCamera;
 	let showDebug = false;
+	let cameraDragState = {
+		active: false,
+		pointerId: null,
+		lastX: 0,
+		lastY: 0
+	};
+	let cameraInputState = {
+		left: false,
+		right: false,
+		up: false,
+		down: false
+	};
+	let cameraBounds = {
+		width: 0,
+		height: 0
+	};
+	const cameraZoomMin = 0.5;
+	const cameraZoomMax = 2.5;
+	const cameraZoomLevels = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5];
+	let cameraZoomLevelIndex = 2;
+	let gameShellInputHandlersInstalled = false;
 
 	// Persona related variables. This should have the name of the persona as its 
 	// keys, and the instances of the Persona class as the values.
@@ -98,6 +125,8 @@
 
 	var personas = {};
 	var pronunciatios = {};
+	var persona_name_labels = {};
+	var offscreen_persona_indicators = {};
 	let anims_direction;
 	let pre_anims_direction;
 	let pre_anims_direction_dict = {};
@@ -124,12 +153,400 @@
 	let execute_count = execute_count_max;
 	let movement_target = {};
 	let simulation_status_request_in_flight = false;
+	let simulation_command_request_in_flight = false;
+	let simulation_command_result_request_in_flight = false;
+	let is_game_focused = false;
+	let last_direction_indicator = "·";
+	let cameraCenter = {x: 800, y: 288};
+	const game_shell = document.getElementById("game-shell");
+	const game_focus_chip = document.getElementById("game-focus-chip");
+	const game_direction_chip = document.getElementById("game-direction-chip");
+
+
+	function clamp_camera_center(x, y) {
+		if (!mainCamera) {
+			return {"x": x, "y": y};
+		}
+
+		let halfWorldWidth = Math.max(0, mainCamera.width / (2 * mainCamera.zoom));
+		let halfWorldHeight = Math.max(0, mainCamera.height / (2 * mainCamera.zoom));
+
+		let centerX = x;
+		let centerY = y;
+		if (cameraBounds.width <= halfWorldWidth * 2) {
+			centerX = cameraBounds.width / 2;
+		} else {
+			centerX = Phaser.Math.Clamp(x, halfWorldWidth, cameraBounds.width - halfWorldWidth);
+		}
+
+		if (cameraBounds.height <= halfWorldHeight * 2) {
+			centerY = cameraBounds.height / 2;
+		} else {
+			centerY = Phaser.Math.Clamp(y, halfWorldHeight, cameraBounds.height - halfWorldHeight);
+		}
+
+		return {"x": centerX, "y": centerY};
+	}
+
+
+	function apply_camera_center(x, y) {
+		if (!mainCamera) {
+			return;
+		}
+
+		let nextCenter = clamp_camera_center(x, y);
+		let halfWorldWidth = mainCamera.width / (2 * mainCamera.zoom);
+		let halfWorldHeight = mainCamera.height / (2 * mainCamera.zoom);
+		cameraCenter.x = nextCenter.x;
+		cameraCenter.y = nextCenter.y;
+		mainCamera.scrollX = Math.round(cameraCenter.x - halfWorldWidth);
+		mainCamera.scrollY = Math.round(cameraCenter.y - halfWorldHeight);
+
+		if (player) {
+			player.setPosition(Math.round(cameraCenter.x), Math.round(cameraCenter.y));
+			if (player.body) {
+				player.body.reset(Math.round(cameraCenter.x), Math.round(cameraCenter.y));
+			}
+		}
+	}
+
+
+	function apply_camera_zoom(nextZoom) {
+		if (!mainCamera) {
+			return;
+		}
+		let snappedZoom = nextZoom;
+		if (cameraZoomLevels && cameraZoomLevels.length > 0) {
+			let bestZoom = cameraZoomLevels[0];
+			let bestDistance = Math.abs(nextZoom - bestZoom);
+			let bestIndex = 0;
+			for (let i = 1; i < cameraZoomLevels.length; i++) {
+				let candidate = cameraZoomLevels[i];
+				let distance = Math.abs(nextZoom - candidate);
+				if (distance < bestDistance) {
+					bestZoom = candidate;
+					bestDistance = distance;
+					bestIndex = i;
+				}
+			}
+			snappedZoom = bestZoom;
+			cameraZoomLevelIndex = bestIndex;
+		}
+		mainCamera.setZoom(Phaser.Math.Clamp(snappedZoom, cameraZoomMin, cameraZoomMax));
+		apply_camera_center(cameraCenter.x, cameraCenter.y);
+	}
+
+
+	function set_game_focus(active) {
+		is_game_focused = active;
+		if (!active) {
+			cameraDragState.active = false;
+			cameraDragState.pointerId = null;
+			reset_camera_input_state();
+		}
+		if (!game_shell) {
+			return;
+		}
+		game_shell.style.borderColor = active ? "#43A047" : "#D7D7D7";
+		game_shell.style.boxShadow = active ? "0 0 0 5px rgba(67, 160, 71, 0.18)" : "none";
+		refresh_camera_shell_cursor();
+		if (game_focus_chip) {
+			game_focus_chip.textContent = active ? "Map controls active" : "Map controls inactive";
+			game_focus_chip.style.color = active ? "#2E7D32" : "#666666";
+			game_focus_chip.style.borderColor = active ? "#81C784" : "#D5D5D5";
+		}
+	}
+
+
+	function refresh_camera_shell_cursor() {
+		if (!game_shell) {
+			return;
+		}
+		if (!is_game_focused) {
+			game_shell.style.cursor = "default";
+			return;
+		}
+		game_shell.style.cursor = cameraDragState.active ? "grabbing" : "grab";
+	}
+
+
+	function reset_camera_input_state() {
+		cameraInputState.left = false;
+		cameraInputState.right = false;
+		cameraInputState.up = false;
+		cameraInputState.down = false;
+	}
+
+
+	function is_text_input_target(target) {
+		if (!target) {
+			return false;
+		}
+		let tagName = target.tagName ? target.tagName.toLowerCase() : "";
+		return tagName === "input"
+			|| tagName === "textarea"
+			|| tagName === "select"
+			|| tagName === "button"
+			|| target.isContentEditable === true;
+	}
+
+
+	function update_camera_input_key_state(event, nextState) {
+		if (!event) {
+			return false;
+		}
+		let handled = true;
+		switch (event.code) {
+			case "KeyA":
+			case "ArrowLeft":
+				cameraInputState.left = nextState;
+				break;
+			case "KeyD":
+			case "ArrowRight":
+				cameraInputState.right = nextState;
+				break;
+			case "KeyW":
+			case "ArrowUp":
+				cameraInputState.up = nextState;
+				break;
+			case "KeyS":
+			case "ArrowDown":
+				cameraInputState.down = nextState;
+				break;
+			default:
+				handled = false;
+				break;
+		}
+		if (handled) {
+			event.preventDefault();
+		}
+		return handled;
+	}
+
+
+	function apply_camera_drag(clientX, clientY) {
+		if (!cameraDragState.active || !mainCamera) {
+			return;
+		}
+		let dragDeltaX = clientX - cameraDragState.lastX;
+		let dragDeltaY = clientY - cameraDragState.lastY;
+		cameraDragState.lastX = clientX;
+		cameraDragState.lastY = clientY;
+		if (dragDeltaX === 0 && dragDeltaY === 0) {
+			return;
+		}
+		apply_camera_center(
+			cameraCenter.x - dragDeltaX / mainCamera.zoom,
+			cameraCenter.y - dragDeltaY / mainCamera.zoom
+		);
+	}
+
+
+	function install_game_shell_input_handlers(gameCanvas) {
+		if (gameShellInputHandlersInstalled || !game_shell || !gameCanvas) {
+			return;
+		}
+
+		gameShellInputHandlersInstalled = true;
+		game_shell.style.userSelect = "none";
+		game_shell.style.webkitUserSelect = "none";
+		game_shell.style.touchAction = "none";
+		gameCanvas.style.touchAction = "none";
+		refresh_camera_shell_cursor();
+
+		game_shell.addEventListener("focus", function() {
+			set_game_focus(true);
+		});
+		game_shell.addEventListener("blur", function() {
+			set_game_focus(false);
+			update_direction_indicator("·");
+		});
+		game_shell.addEventListener("mousedown", function() {
+			game_shell.focus();
+		});
+
+		window.addEventListener("keydown", function(event) {
+			if (!is_game_focused || is_text_input_target(event.target)) {
+				return;
+			}
+			update_camera_input_key_state(event, true);
+		}, true);
+		window.addEventListener("keyup", function(event) {
+			if (!is_game_focused || is_text_input_target(event.target)) {
+				return;
+			}
+			update_camera_input_key_state(event, false);
+		}, true);
+		window.addEventListener("blur", function() {
+			set_game_focus(false);
+			update_direction_indicator("·");
+		});
+		document.addEventListener("visibilitychange", function() {
+			if (document.hidden) {
+				set_game_focus(false);
+				update_direction_indicator("·");
+			}
+		});
+
+		gameCanvas.addEventListener("pointerdown", function(event) {
+			if (event.button !== 0) {
+				return;
+			}
+			game_shell.focus();
+			cameraDragState.active = true;
+			cameraDragState.pointerId = event.pointerId;
+			cameraDragState.lastX = event.clientX;
+			cameraDragState.lastY = event.clientY;
+			refresh_camera_shell_cursor();
+			if (gameCanvas.setPointerCapture) {
+				gameCanvas.setPointerCapture(event.pointerId);
+			}
+			event.preventDefault();
+		});
+		window.addEventListener("pointermove", function(event) {
+			if (!cameraDragState.active) {
+				return;
+			}
+			if (cameraDragState.pointerId !== null && event.pointerId !== cameraDragState.pointerId) {
+				return;
+			}
+			apply_camera_drag(event.clientX, event.clientY);
+			event.preventDefault();
+		}, {passive: false});
+		function end_camera_drag(event) {
+			if (!cameraDragState.active) {
+				return;
+			}
+			if (event && cameraDragState.pointerId !== null && event.pointerId !== cameraDragState.pointerId) {
+				return;
+			}
+			if (event && gameCanvas.releasePointerCapture && cameraDragState.pointerId !== null) {
+				try {
+					gameCanvas.releasePointerCapture(cameraDragState.pointerId);
+				} catch (error) {
+				}
+			}
+			cameraDragState.active = false;
+			cameraDragState.pointerId = null;
+			refresh_camera_shell_cursor();
+		}
+		window.addEventListener("pointerup", end_camera_drag);
+		window.addEventListener("pointercancel", end_camera_drag);
+
+		gameCanvas.addEventListener("wheel", function(event) {
+			event.preventDefault();
+			game_shell.focus();
+			set_game_focus(true);
+			if (event.deltaY === 0) {
+				return;
+			}
+			let zoomDirection = event.deltaY > 0 ? -1 : 1;
+			let nextIndex = Phaser.Math.Clamp(
+				cameraZoomLevelIndex + zoomDirection,
+				0,
+				cameraZoomLevels.length - 1
+			);
+			apply_camera_zoom(cameraZoomLevels[nextIndex]);
+		}, {passive: false});
+	}
+
+
+	function update_direction_indicator(directionSymbol) {
+		last_direction_indicator = directionSymbol || "·";
+		if (game_direction_chip) {
+			game_direction_chip.textContent = "Direction: " + last_direction_indicator;
+		}
+	}
+
+
+	function position_persona_label(persona_name) {
+		let persona = personas[persona_name];
+		let pronunciatio = pronunciatios[persona_name];
+		let label = persona_name_labels[persona_name];
+		if (!persona || !pronunciatio || !label) {
+			return;
+		}
+		label.container.x = persona.body.x + 16;
+		label.container.y = persona.body.y - 62;
+		pronunciatio.x = persona.body.x + 16;
+		pronunciatio.y = persona.body.y - 92;
+	}
+
+
+	function direction_symbol_from_vector(dx, dy) {
+		let absX = Math.abs(dx);
+		let absY = Math.abs(dy);
+		if (absX < 1 && absY < 1) return "·";
+		if (absX > absY * 1.5) return dx > 0 ? "→" : "←";
+		if (absY > absX * 1.5) return dy > 0 ? "↓" : "↑";
+		if (dx > 0 && dy > 0) return "↘";
+		if (dx > 0 && dy < 0) return "↗";
+		if (dx < 0 && dy > 0) return "↙";
+		return "↖";
+	}
+
+
+	function refresh_offscreen_indicator(persona_name) {
+		let indicator = offscreen_persona_indicators[persona_name];
+		let persona = personas[persona_name];
+		if (!indicator || !persona || !mainCamera) {
+			return;
+		}
+
+		let worldX = persona.body.x + 16;
+		let worldY = persona.body.y + 16;
+		if (mainCamera.worldView.contains(worldX, worldY)) {
+			indicator.container.setVisible(false);
+			return;
+		}
+
+		let screenXRaw = (worldX - mainCamera.worldView.x) * mainCamera.zoom;
+		let screenYRaw = (worldY - mainCamera.worldView.y) * mainCamera.zoom;
+		let dx = screenXRaw - mainCamera.width / 2;
+		let dy = screenYRaw - mainCamera.height / 2;
+		let angle = Math.atan2(dy, dx);
+		let marginX = 92;
+		let marginY = 68;
+		let halfScreenWidth = mainCamera.width / 2 - marginX;
+		let halfScreenHeight = mainCamera.height / 2 - marginY;
+		let cosValue = Math.cos(angle);
+		let sinValue = Math.sin(angle);
+		let xScale = Math.abs(cosValue) < 0.0001 ? Number.POSITIVE_INFINITY : Math.abs(halfScreenWidth / cosValue);
+		let yScale = Math.abs(sinValue) < 0.0001 ? Number.POSITIVE_INFINITY : Math.abs(halfScreenHeight / sinValue);
+		let scale = Math.min(xScale, yScale);
+		let screenX = Math.round(mainCamera.width / 2 + cosValue * scale);
+		let screenY = Math.round(mainCamera.height / 2 + sinValue * scale);
+
+		indicator.arrowText.setText(direction_symbol_from_vector(dx, dy));
+		indicator.avatar.setTexture(persona.texture.key, persona.frame.name);
+		indicator.nameText.setText(persona_name);
+		indicator.container.x = screenX;
+		indicator.container.y = screenY;
+		indicator.container.setVisible(true);
+	}
+
+
+	function refresh_persona_overlays() {
+		for (let i = 0; i < Object.keys(personas).length; i++) {
+			let persona_name = Object.keys(personas)[i];
+			position_persona_label(persona_name);
+			refresh_offscreen_indicator(persona_name);
+		}
+	}
 
 
 	function set_text_content(element_id, value) {
 		let node = document.getElementById(element_id);
 		if (node) {
 			node.textContent = value;
+		}
+	}
+
+
+	function set_html_content(element_id, value) {
+		let node = document.getElementById(element_id);
+		if (node) {
+			node.innerHTML = value;
 		}
 	}
 
@@ -273,10 +690,190 @@
 		status_xobj.send();
 	}
 
+
+	function render_simulation_command_result(payload) {
+		let panel = document.getElementById("simulation-command-panel");
+		if (!panel || !is_simulation_mode) {
+			return;
+		}
+
+		let state = "idle";
+		let commandText = "-";
+		let source = "-";
+		let output = "-";
+		let note = "No command submitted from the page yet.";
+		if (payload) {
+			state = payload.state || "idle";
+			commandText = payload.command || "-";
+			source = payload.source || "-";
+			output = payload.error ? payload.error : (payload.output || "-");
+
+			if (payload.meta && payload.meta.matches_requested_simulation === false) {
+				note = "The latest command result belongs to another simulation window.";
+			} else if (state === "completed") {
+				note = "Latest command completed.";
+			} else if (state === "failed" || state === "rejected") {
+				note = "Latest command failed.";
+			} else if (state === "submitted") {
+				note = "Command submitted. Waiting for backend to consume it.";
+			}
+		}
+
+		let stateClass = "label label-default";
+		if (state == "completed") stateClass = "label label-success";
+		else if (state == "submitted") stateClass = "label label-info";
+		else if (state == "failed" || state == "rejected") stateClass = "label label-danger";
+
+		let commandStateNode = document.getElementById("simulation-command-state");
+		if (commandStateNode) {
+			commandStateNode.className = stateClass;
+			commandStateNode.textContent = state;
+		}
+		set_text_content("simulation-command-last", commandText);
+		set_text_content("simulation-command-source", source);
+		set_text_content("simulation-command-note", note);
+		set_text_content("simulation-command-output", output);
+	}
+
+
+	function fetch_simulation_command_result() {
+		if (!is_simulation_mode || simulation_command_result_request_in_flight) {
+			return;
+		}
+
+		simulation_command_result_request_in_flight = true;
+		var result_xobj = new XMLHttpRequest();
+		result_xobj.overrideMimeType("application/json");
+		result_xobj.open(
+			'GET',
+			"{% url 'simulation_command_result' %}?sim_code=" + encodeURIComponent(sim_code),
+			true
+		);
+		result_xobj.addEventListener("load", function() {
+			simulation_command_result_request_in_flight = false;
+			if (this.readyState === 4 && result_xobj.status === 200) {
+				render_simulation_command_result(JSON.parse(result_xobj.responseText));
+			}
+		});
+		result_xobj.addEventListener("error", function() {
+			simulation_command_result_request_in_flight = false;
+			render_simulation_command_result({
+				"state": "failed",
+				"command": "-",
+				"source": "web",
+				"error": "Failed to reach /simulation_command_result/."
+			});
+		});
+		result_xobj.send();
+	}
+
+
+	function submit_simulation_command(commandText) {
+		let cleanCommand = (commandText || "").trim();
+		if (!cleanCommand || simulation_command_request_in_flight) {
+			return;
+		}
+
+		simulation_command_request_in_flight = true;
+		render_simulation_command_result({
+			"state": "submitted",
+			"command": cleanCommand,
+			"source": "web",
+			"output": "Submitting command..."
+		});
+
+		var command_xobj = new XMLHttpRequest();
+		command_xobj.overrideMimeType("application/json");
+		command_xobj.open('POST', "{% url 'simulation_command' %}", true);
+		command_xobj.setRequestHeader("Content-Type", "application/json");
+		command_xobj.addEventListener("load", function() {
+			simulation_command_request_in_flight = false;
+			if (this.readyState === 4 && command_xobj.status === 200) {
+				render_simulation_command_result({
+					"state": "submitted",
+					"command": cleanCommand,
+					"source": "web",
+					"output": "Command submitted. Waiting for backend execution..."
+				});
+				window.setTimeout(fetch_simulation_command_result, 250);
+				return;
+			}
+			render_simulation_command_result({
+				"state": "failed",
+				"command": cleanCommand,
+				"source": "web",
+				"error": "Command submission failed."
+			});
+		});
+		command_xobj.addEventListener("error", function() {
+			simulation_command_request_in_flight = false;
+			render_simulation_command_result({
+				"state": "failed",
+				"command": cleanCommand,
+				"source": "web",
+				"error": "Failed to reach /simulation_command/."
+			});
+		});
+		command_xobj.send(JSON.stringify({
+			"sim_code": sim_code,
+			"command": cleanCommand
+		}));
+	}
+
+
+	function bind_simulation_command_controls() {
+		if (!is_simulation_mode) {
+			return;
+		}
+
+		let runStepsInput = document.getElementById("run-steps-input");
+		let customCommandInput = document.getElementById("custom-command-input");
+		let runStepsButton = document.getElementById("run-steps-button");
+		let statusCommandButton = document.getElementById("status-command-button");
+		let stopCommandButton = document.getElementById("stop-command-button");
+		let saveCommandButton = document.getElementById("save-command-button");
+		let customCommandButton = document.getElementById("custom-command-button");
+
+		if (runStepsButton) {
+			runStepsButton.onclick = function() {
+				let steps = parseInt(runStepsInput.value || "0");
+				if (Number.isNaN(steps) || steps <= 0) {
+					render_simulation_command_result({
+						"state": "failed",
+						"command": "run",
+						"source": "web",
+						"error": "Run steps must be a positive integer."
+					});
+					return;
+				}
+				submit_simulation_command("run " + steps);
+			};
+		}
+		if (statusCommandButton) statusCommandButton.onclick = function() { submit_simulation_command("status"); };
+		if (stopCommandButton) stopCommandButton.onclick = function() { submit_simulation_command("stop"); };
+		if (saveCommandButton) saveCommandButton.onclick = function() { submit_simulation_command("save"); };
+		if (customCommandButton) {
+			customCommandButton.onclick = function() {
+				submit_simulation_command(customCommandInput.value);
+			};
+		}
+		if (customCommandInput) {
+			customCommandInput.addEventListener("keydown", function(event) {
+				if (event.key === "Enter") {
+					event.preventDefault();
+					submit_simulation_command(customCommandInput.value);
+				}
+			});
+		}
+	}
+
 	if (is_simulation_mode) {
 		fetch_simulation_status();
 		window.setInterval(fetch_simulation_status, 1500);
+		fetch_simulation_command_result();
+		window.setInterval(fetch_simulation_command_result, 1500);
 	}
+	bind_simulation_command_controls();
 	
 
 	// ###########################################################################
@@ -341,6 +938,8 @@
 
 	function create() {  
 	  const map = this.make.tilemap({ key: "map" });
+	  cameraBounds.width = map.widthInPixels;
+	  cameraBounds.height = map.heightInPixels;
 	  // Joon: Logging map is really helpful for debugging here: 
 	  //       console.log(map);
 
@@ -391,6 +990,19 @@
 	  foregroundL2Layer.setDepth(2);
 
 	  const collisionsLayer = map.createLayer("Collisions", collisions, 0, 0);
+	  const worldRenderObjects = [
+	  	bottomGroundLayer,
+	  	exteriorGroundLayer,
+	  	exteriorDecorationL1Layer,
+	  	exteriorDecorationL2Layer,
+	  	interiorGroundLayer,
+	  	wallLayer,
+	  	interiorFurnitureL1Layer,
+	  	interiorFurnitureL2Layer,
+	  	foregroundL1Layer,
+	  	foregroundL2Layer,
+	  	collisionsLayer
+	  ];
 	  // const groundLayer = map.createLayer("Ground", walls, 0, 0);
 	  // const indoorGroundLayer = map.createLayer("Indoor Ground", walls, 0, 0);
 	  // const wallsLayer = map.createLayer("Walls", walls, 0, 0);
@@ -428,10 +1040,15 @@
 	                setOffset(0, 0);
 	  player.setDepth(-1);
 	  // Setting up the camera. 
-	  const camera = this.cameras.main;
-	  camera.startFollow(player);
-	  camera.setBounds(0, 0, map.widthInPixels, map.heightInPixels);
-	  cursors = this.input.keyboard.createCursorKeys();
+	  mainCamera = this.cameras.main;
+	  mainCamera.roundPixels = true;
+	  mainCamera.setBounds(0, 0, map.widthInPixels, map.heightInPixels);
+	  cameraCenter.x = player.x;
+	  cameraCenter.y = player.y;
+	  apply_camera_zoom(cameraZoomLevels[cameraZoomLevelIndex]);
+	  apply_camera_center(cameraCenter.x, cameraCenter.y);
+	  worldRenderObjects.push(player);
+	  install_game_shell_input_handlers(this.game.canvas);
 
 	  // *** SET UP PERSONAS *** 
 	  // We start by creating the game sprite objects. 
@@ -445,17 +1062,85 @@
 	                         .setOffset(0, 32); // DEBUG 1 --- I added 32 offset on Dec 29. 
 	    // Here, we are creating the persona and its pronunciatio sprites.
 	    personas[persona_name] = new_sprite;
+	    worldRenderObjects.push(new_sprite);
 	    pronunciatios[persona_name] = this.add.text(
-	                                   new_sprite.body.x - 6, 
-	                                   new_sprite.body.y - 42 - 32, // DEBUG 1 --- I added 32 offset on Dec 29. 
+	                                   new_sprite.body.x + 16, 
+	                                   new_sprite.body.y - 92,
 	                                   "🦁", {
 	                                   font: "28px monospace", 
 	                                   fill: "#000000", 
 	                                   padding: { x: 8, y: 8}, 
 	                                   backgroundColor: "#ffffff",
 	                                   border:"solid",
-	                                   borderRadius:"10px"}).setDepth(3);
+	                                   borderRadius:"10px"}).setDepth(3).setOrigin(0.5, 1);
+	    worldRenderObjects.push(pronunciatios[persona_name]);
+	    let nameLabelText = this.add.text(
+	                                   0,
+	                                   0,
+	                                   persona_name, {
+	                                   font: "12px monospace",
+	                                   fill: "#133A1B"}).setOrigin(0.5, 0.5);
+	    let nameLabelBox = this.add.rectangle(
+	                                   0,
+	                                   0,
+	                                   nameLabelText.width + 18,
+	                                   nameLabelText.height + 10,
+	                                   0xFFFFFF,
+	                                   0.96).setStrokeStyle(2, 0x43A047, 0.98);
+	    let nameLabelContainer = this.add.container(
+	                                   new_sprite.body.x + 16,
+	                                   new_sprite.body.y - 62,
+	                                   [nameLabelBox, nameLabelText]).setDepth(4);
+	    worldRenderObjects.push(nameLabelContainer);
+	    persona_name_labels[persona_name] = {
+	    	container: nameLabelContainer,
+	    	box: nameLabelBox,
+	    	text: nameLabelText
+	    };
+	    let indicatorBox = this.add.rectangle(
+	                                   0,
+	                                   0,
+	                                   212,
+	                                   50,
+	                                   0xFFFFFF,
+	                                   0.96).setStrokeStyle(2, 0x1E88E5, 0.98);
+	    let indicatorAvatar = this.add.image(-62, 0, "atlas", "misa-front").setDisplaySize(24, 32);
+	    let indicatorNameText = this.add.text(
+	                                   -40,
+	                                   0,
+	                                   persona_name, {
+	                                   font: "10px monospace",
+	                                   fill: "#12324A"}).setOrigin(0, 0.5);
+	    let indicatorArrowText = this.add.text(
+	                                   67,
+	                                   0,
+	                                   "→", {
+	                                   font: "20px monospace",
+	                                   fill: "#0D47A1"}).setOrigin(0.5, 0.5);
+	    let indicatorContainer = this.add.container(
+	                                   0,
+	                                   0,
+	                                   [indicatorBox, indicatorAvatar, indicatorNameText, indicatorArrowText]
+	                                   ).setDepth(8).setScrollFactor(0).setVisible(false);
+	    offscreen_persona_indicators[persona_name] = {
+	    	container: indicatorContainer,
+	    	box: indicatorBox,
+	    	avatar: indicatorAvatar,
+	    	nameText: indicatorNameText,
+	    	arrowText: indicatorArrowText
+	    };
+	    position_persona_label(persona_name);
 	  }
+	  uiCamera = this.cameras.add(0, 0, config.width, config.height);
+	  uiCamera.setScroll(0, 0);
+	  uiCamera.setZoom(1);
+	  uiCamera.roundPixels = true;
+	  uiCamera.ignore(worldRenderObjects);
+	  for (let i = 0; i < Object.keys(offscreen_persona_indicators).length; i++) {
+	  	let persona_name = Object.keys(offscreen_persona_indicators)[i];
+	  	mainCamera.ignore(offscreen_persona_indicators[persona_name].container);
+	  }
+	  refresh_persona_overlays();
 
 	  // Create the player's walking animations from the texture atlas. These are
 	  // stored in the global animation manager so any sprite can access them.
@@ -506,21 +1191,33 @@
 	  // This is where we finish up the camera setting we started in the create() 
 	  // function. We set the movement speed of the camera and wire up the keys to
 	  // map to the actual movement.
-	  const camera_speed = 400;
-	  // Stop any previous movement from the last frame
-	  player.body.setVelocity(0);
-	  if (cursors.left.isDown) {
-	    player.body.setVelocityX(-camera_speed);
-	  } 
-	  if (cursors.right.isDown) {
-	    player.body.setVelocityX(camera_speed);
-	  } 
-	  if (cursors.up.isDown) {
-	    player.body.setVelocityY(-camera_speed);
-	  } 
-	  if (cursors.down.isDown) {
-	    player.body.setVelocityY(camera_speed);
+	  const camera_speed = 520 / mainCamera.zoom;
+	  let moveLeft = is_game_focused && cameraInputState.left;
+	  let moveRight = is_game_focused && cameraInputState.right;
+	  let moveUp = is_game_focused && cameraInputState.up;
+	  let moveDown = is_game_focused && cameraInputState.down;
+	  let cameraDeltaX = 0;
+	  let cameraDeltaY = 0;
+	  if (moveLeft) cameraDeltaX -= camera_speed * (delta / 1000.0);
+	  if (moveRight) cameraDeltaX += camera_speed * (delta / 1000.0);
+	  if (moveUp) cameraDeltaY -= camera_speed * (delta / 1000.0);
+	  if (moveDown) cameraDeltaY += camera_speed * (delta / 1000.0);
+	  if (cameraDeltaX !== 0 || cameraDeltaY !== 0) {
+	  	apply_camera_center(cameraCenter.x + cameraDeltaX, cameraCenter.y + cameraDeltaY);
 	  }
+	  let directionSymbol = "·";
+	  if (moveLeft && moveUp) directionSymbol = "↖";
+	  else if (moveRight && moveUp) directionSymbol = "↗";
+	  else if (moveLeft && moveDown) directionSymbol = "↙";
+	  else if (moveRight && moveDown) directionSymbol = "↘";
+	  else if (moveLeft) directionSymbol = "←";
+	  else if (moveRight) directionSymbol = "→";
+	  else if (moveUp) directionSymbol = "↑";
+	  else if (moveDown) directionSymbol = "↓";
+	  if (directionSymbol !== last_direction_indicator) {
+	  	update_direction_indicator(directionSymbol);
+	  }
+	  refresh_persona_overlays();
 
 	  // console.log("phase: " + phase + ", step: " + step);
 	  // *** MOVE PERSONAS ***
@@ -637,8 +1334,7 @@
 	        	anims_direction = "";
 	        }
 
-	        curr_pronunciatio.x = curr_persona.body.x - 6; 
-          curr_pronunciatio.y = curr_persona.body.y - 42 - 32; // DEBUG 1 --- I added 32 offset on Dec 29. 
+	        position_persona_label(curr_persona_name);
 
           if (anims_direction == "l") {
 			      curr_persona.anims.play("misa-left-walk", true);
@@ -668,10 +1364,12 @@
 	          let curr_persona = personas[curr_persona_name];
 	          curr_persona.body.x = movement_target[curr_persona_name][0];
 	          curr_persona.body.y = movement_target[curr_persona_name][1];
+	          position_persona_label(curr_persona_name);
 	        }
 	        phase = "process";
 	        execute_count = execute_count_max + 1;
 	        step = step + 1;
+	        refresh_persona_overlays();
 	      }
 	    }
 
@@ -708,6 +1406,3 @@
 	var play_button=document.getElementById("play_button");
 	var pause_button=document.getElementById("pause_button");
 </script>
-
-
-
