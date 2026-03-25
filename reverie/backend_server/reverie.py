@@ -27,6 +27,7 @@ import time
 import math
 import os
 import shutil
+import threading
 import traceback
 
 try:
@@ -161,6 +162,267 @@ class ReverieServer:
     with open(f"{fs_temp_storage}/curr_step.json", "w") as outfile: 
       outfile.write(json.dumps(curr_step, indent=2))
 
+    # BACKGROUND RUN JOB STATE
+    self.status_file_path = f"{fs_temp_storage}/simulation_status.json"
+    self._job_lock = threading.Lock()
+    self._worker_thread = None
+    self._active_job = None
+    self._write_status_file()
+
+
+  def _now_iso(self):
+    return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+  def _build_status_snapshot_locked(self):
+    current_step = self.step
+    current_time = self.curr_time.strftime("%B %d, %Y, %H:%M:%S")
+
+    if self._active_job is None:
+      return {
+        "simulation": {
+          "sim_code": self.sim_code,
+          "fork_sim_code": self.fork_sim_code,
+        },
+        "job": {
+          "job_id": None,
+          "state": "idle",
+          "requested_steps": 0,
+          "completed_steps": 0,
+          "current_world_step": current_step,
+          "started_at": None,
+          "updated_at": self._now_iso(),
+          "stop_requested": False,
+        },
+        "progress": {
+          "current_persona": None,
+          "current_stage": "idle",
+          "current_prompt_type": None,
+          "current_time": current_time,
+        },
+        "last_error": None,
+      }
+
+    job = dict(self._active_job)
+    last_error = job.get("last_error")
+    return {
+      "simulation": {
+        "sim_code": self.sim_code,
+        "fork_sim_code": self.fork_sim_code,
+      },
+      "job": {
+        "job_id": job.get("job_id"),
+        "state": job.get("state", "idle"),
+        "requested_steps": job.get("requested_steps", 0),
+        "completed_steps": job.get("completed_steps", 0),
+        "current_world_step": job.get("current_world_step", current_step),
+        "started_at": job.get("started_at"),
+        "updated_at": job.get("updated_at"),
+        "stop_requested": job.get("stop_requested", False),
+      },
+      "progress": {
+        "current_persona": job.get("current_persona"),
+        "current_stage": job.get("current_stage", "idle"),
+        "current_prompt_type": job.get("current_prompt_type"),
+        "current_time": current_time,
+      },
+      "last_error": last_error,
+    }
+
+
+  def _write_status_file(self, snapshot=None):
+    if snapshot is None:
+      with self._job_lock:
+        snapshot = self._build_status_snapshot_locked()
+
+    tmp_path = self.status_file_path + ".tmp"
+    with open(tmp_path, "w") as outfile:
+      outfile.write(json.dumps(snapshot, indent=2))
+    os.replace(tmp_path, self.status_file_path)
+
+
+  def _job_is_active_locked(self):
+    if self._active_job is None:
+      return False
+    return self._active_job.get("state") in ("queued", "running", "cancelling")
+
+
+  def _has_active_run_job(self):
+    with self._job_lock:
+      return self._job_is_active_locked()
+
+
+  def _update_active_job(self, job_id=None, **fields):
+    with self._job_lock:
+      if self._active_job is None:
+        return
+      if job_id and self._active_job.get("job_id") != job_id:
+        return
+
+      changed = False
+      for key, value in fields.items():
+        if self._active_job.get(key) != value:
+          self._active_job[key] = value
+          changed = True
+      if not changed:
+        return
+      self._active_job["updated_at"] = self._now_iso()
+      snapshot = self._build_status_snapshot_locked()
+
+    self._write_status_file(snapshot)
+
+
+  def _increment_completed_steps(self, job_id):
+    with self._job_lock:
+      if self._active_job is None:
+        return
+      if self._active_job.get("job_id") != job_id:
+        return
+
+      self._active_job["completed_steps"] += 1
+      self._active_job["current_world_step"] = self.step
+      self._active_job["updated_at"] = self._now_iso()
+      snapshot = self._build_status_snapshot_locked()
+
+    self._write_status_file(snapshot)
+
+
+  def _stop_requested_for_job(self, job_id):
+    with self._job_lock:
+      if self._active_job is None:
+        return False
+      if self._active_job.get("job_id") != job_id:
+        return False
+      return bool(self._active_job.get("stop_requested", False))
+
+
+  def _format_run_status(self):
+    with self._job_lock:
+      snapshot = self._build_status_snapshot_locked()
+
+    job = snapshot["job"]
+    progress = snapshot["progress"]
+    simulation = snapshot["simulation"]
+    last_error = snapshot["last_error"]
+
+    lines = []
+    lines += [f"simulation: {simulation['sim_code']} (forked from {simulation['fork_sim_code']})"]
+    lines += [f"state: {job['state']}"]
+    lines += [f"step progress: {job['completed_steps']} / {job['requested_steps']}"]
+    lines += [f"current world step: {job['current_world_step']}"]
+    lines += [f"current time: {progress['current_time']}"]
+    lines += [f"current persona: {progress['current_persona'] or '-'}"]
+    lines += [f"current stage: {progress['current_stage'] or '-'}"]
+    lines += [f"stop requested: {job['stop_requested']}"]
+    lines += [f"job id: {job['job_id'] or '-'}"]
+    lines += [f"started at: {job['started_at'] or '-'}"]
+    lines += [f"updated at: {job['updated_at'] or '-'}"]
+    if last_error:
+      lines += [f"last error: {last_error.get('type', 'Error')}: {last_error.get('message', '')}"]
+    return "\n".join(lines)
+
+
+  def _start_background_run(self, requested_steps):
+    if requested_steps <= 0:
+      return False, "Step count must be a positive integer."
+
+    with self._job_lock:
+      if self._job_is_active_locked():
+        current_job_id = self._active_job.get("job_id")
+        return False, (
+          "A run job is already active. "
+          f"Use 'status' to inspect it or 'stop' to request a graceful stop. "
+          f"(job_id={current_job_id})"
+        )
+
+      job_id = f"run-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
+      self._active_job = {
+        "job_id": job_id,
+        "state": "queued",
+        "requested_steps": requested_steps,
+        "completed_steps": 0,
+        "current_world_step": self.step,
+        "current_persona": None,
+        "current_stage": "queued",
+        "current_prompt_type": None,
+        "started_at": None,
+        "updated_at": self._now_iso(),
+        "stop_requested": False,
+        "last_error": None,
+      }
+      snapshot = self._build_status_snapshot_locked()
+
+    self._write_status_file(snapshot)
+    self._worker_thread = threading.Thread(
+      target=self._run_background_job,
+      args=(job_id, requested_steps),
+      daemon=True,
+      name=f"reverie-run-{job_id}",
+    )
+    self._worker_thread.start()
+    return True, (
+      f"Started background run job {job_id} for {requested_steps} step(s). "
+      "Use 'status' to inspect progress or 'stop' to request a graceful stop."
+    )
+
+
+  def _request_stop_for_active_job(self):
+    with self._job_lock:
+      if not self._job_is_active_locked():
+        return "No active run job."
+
+      self._active_job["state"] = "cancelling"
+      self._active_job["stop_requested"] = True
+      self._active_job["updated_at"] = self._now_iso()
+      snapshot = self._build_status_snapshot_locked()
+
+    self._write_status_file(snapshot)
+    return "Stop requested. The active run job will stop after the current step finishes."
+
+
+  def _run_background_job(self, job_id, requested_steps):
+    self._update_active_job(
+      job_id,
+      state="running",
+      started_at=self._now_iso(),
+      current_world_step=self.step,
+      current_persona=None,
+      current_stage="starting",
+      current_prompt_type=None,
+      last_error=None,
+    )
+    print(f"[run-job] started job_id={job_id} requested_steps={requested_steps}")
+
+    try:
+      self.start_server(requested_steps, job_id=job_id)
+      final_state = "stopped" if self._stop_requested_for_job(job_id) else "completed"
+      self._update_active_job(
+        job_id,
+        state=final_state,
+        current_world_step=self.step,
+        current_persona=None,
+        current_stage="idle",
+        current_prompt_type=None,
+      )
+      print(f"[run-job] finished job_id={job_id} state={final_state}")
+    except Exception as exc:
+      traceback_str = traceback.format_exc()
+      traceback.print_exc()
+      self._update_active_job(
+        job_id,
+        state="failed",
+        current_world_step=self.step,
+        current_persona=None,
+        current_stage="failed",
+        current_prompt_type=None,
+        last_error={
+          "type": type(exc).__name__,
+          "message": str(exc),
+          "traceback": traceback_str,
+        },
+      )
+      print(f"[run-job] failed job_id={job_id} error={type(exc).__name__}: {exc}")
+
 
   def save(self): 
     """
@@ -195,6 +457,7 @@ class ReverieServer:
     for persona_name, persona in self.personas.items(): 
       save_folder = f"{sim_folder}/personas/{persona_name}/bootstrap_memory"
       persona.save(save_folder)
+    self._write_status_file()
 
 
   def start_path_tester_server(self): 
@@ -286,7 +549,7 @@ class ReverieServer:
       time.sleep(self.server_sleep * 10)
 
 
-  def start_server(self, int_counter): 
+  def start_server(self, int_counter, job_id=None): 
     """
     The main backend server of Reverie. 
     This function retrieves the environment file from the frontend to 
@@ -317,12 +580,15 @@ class ReverieServer:
       # Done with this iteration if <int_counter> reaches 0. 
       if int_counter == 0: 
         break
+      if job_id and self._stop_requested_for_job(job_id):
+        break
 
       # <curr_env_file> file is the file that our frontend outputs. When the
       # frontend has done its job and moved the personas, then it will put a 
       # new environment file that matches our step count. That's when we run 
       # the content of this for loop. Otherwise, we just wait. 
       curr_env_file = f"{sim_folder}/environment/{self.step}.json"
+      env_retrieved = False
       if check_if_file_exists(curr_env_file):
         # If we have an environment file, it means we have a new perception
         # input to our personas. So we first retrieve it.
@@ -335,6 +601,15 @@ class ReverieServer:
           pass
       
         if env_retrieved: 
+          if job_id:
+            self._update_active_job(
+              job_id,
+              state="running",
+              current_world_step=self.step,
+              current_persona=None,
+              current_stage="step.begin",
+              current_prompt_type=None,
+            )
           # This is where we go through <game_obj_cleanup> to clean up all 
           # object actions that were used in this cylce. 
           for key, val in game_obj_cleanup.items(): 
@@ -381,6 +656,15 @@ class ReverieServer:
           movements = {"persona": dict(), 
                        "meta": dict()}
           for persona_name, persona in self.personas.items(): 
+            if job_id:
+              self._update_active_job(
+                job_id,
+                state="running",
+                current_world_step=self.step,
+                current_persona=persona_name,
+                current_stage="persona.move",
+                current_prompt_type=None,
+              )
             # <next_tile> is a x,y coordinate. e.g., (58, 9)
             # <pronunciatio> is an emoji. e.g., "\ud83d\udca4"
             # <description> is a string description of the movement. e.g., 
@@ -407,6 +691,15 @@ class ReverieServer:
           # {"persona": {"Maria Lopez": {"movement": [58, 9]}},
           #  "persona": {"Klaus Mueller": {"movement": [38, 12]}}, 
           #  "meta": {curr_time: <datetime>}}
+          if job_id:
+            self._update_active_job(
+              job_id,
+              state="running",
+              current_world_step=self.step,
+              current_persona=None,
+              current_stage="step.commit",
+              current_prompt_type=None,
+            )
           curr_move_file = f"{sim_folder}/movement/{self.step}.json"
           with open(curr_move_file, "w") as outfile: 
             outfile.write(json.dumps(movements, indent=2))
@@ -417,6 +710,25 @@ class ReverieServer:
           self.curr_time += datetime.timedelta(seconds=self.sec_per_step)
 
           int_counter -= 1
+          if job_id:
+            self._increment_completed_steps(job_id)
+            self._update_active_job(
+              job_id,
+              state="running",
+              current_world_step=self.step,
+              current_persona=None,
+              current_stage="waiting_for_frontend_environment",
+              current_prompt_type=None,
+            )
+      elif job_id:
+        self._update_active_job(
+          job_id,
+          state="running" if not self._stop_requested_for_job(job_id) else "cancelling",
+          current_world_step=self.step,
+          current_persona=None,
+          current_stage="waiting_for_frontend_environment",
+          current_prompt_type=None,
+        )
           
       # Sleep so we don't burn our machines. 
       time.sleep(self.server_sleep)
@@ -444,38 +756,53 @@ class ReverieServer:
       sim_command = input("Enter option: ")
       sim_command = sim_command.strip()
       ret_str = ""
+      command_lower = sim_command.lower()
 
       try: 
-        if sim_command.lower() in ["f", "fin", "finish", "save and finish"]: 
+        if command_lower in ["status", "jobs"]:
+          ret_str += self._format_run_status()
+
+        elif command_lower == "stop":
+          ret_str += self._request_stop_for_active_job()
+
+        elif self._has_active_run_job():
+          ret_str += (
+            "A background run job is active. "
+            "Only 'status', 'jobs', and 'stop' are available until it finishes."
+          )
+
+        elif command_lower in ["f", "fin", "finish", "save and finish"]: 
           # Finishes the simulation environment and saves the progress. 
           # Example: fin
           self.save()
           break
 
-        elif sim_command.lower() == "start path tester mode": 
+        elif command_lower == "start path tester mode": 
           # Starts the path tester and removes the currently forked sim files.
           # Note that once you start this mode, you need to exit out of the
           # session and restart in case you want to run something else. 
           shutil.rmtree(sim_folder) 
           self.start_path_tester_server()
 
-        elif sim_command.lower() == "exit": 
+        elif command_lower == "exit": 
           # Finishes the simulation environment but does not save the progress
           # and erases all saved data from current simulation. 
           # Example: exit 
           shutil.rmtree(sim_folder) 
           break 
 
-        elif sim_command.lower() == "save": 
+        elif command_lower == "save": 
           # Saves the current simulation progress. 
           # Example: save
           self.save()
 
-        elif sim_command[:3].lower() == "run": 
-          # Runs the number of steps specified in the prompt.
-          # Example: run 1000
-          int_count = int(sim_command.split()[-1])
-          self.start_server(int_count)
+        elif sim_command[:3].lower() == "run":
+          parts = sim_command.split()
+          if len(parts) != 2:
+            raise ValueError("Usage: run <positive-step-count>")
+          int_count = int(parts[-1])
+          _, message = self._start_background_run(int_count)
+          ret_str += message
 
         elif ("print persona schedule" 
               in sim_command[:22].lower()): 
@@ -635,9 +962,6 @@ if __name__ == '__main__':
 
   rs = ReverieServer(origin, target)
   rs.open_server()
-
-
-
 
 
 
