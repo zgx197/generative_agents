@@ -2,28 +2,310 @@
 Author: Joon Sung Park (joonspk@stanford.edu)
 
 File: gpt_structure.py
-Description: Wrapper functions for calling OpenAI APIs.
+Description: Compatibility wrapper for chat and embedding providers.
 """
 import json
-import random
-import openai
+import os
 import time 
 
 from utils import *
+from persona.prompt_template.ai_observability import AIClientError
+from persona.prompt_template.chat_client import *
+from persona.prompt_template.embedding_client import *
 
-openai.api_key = openai_api_key
+_chat_client = None
+_embedding_client = None
+_client_signature = None
 
 def temp_sleep(seconds=0.1):
   time.sleep(seconds)
 
+
+def _setting(name, default=None):
+  return globals().get(name, default)
+
+
+def _build_ai_config():
+  chat_provider = str(_setting("chat_provider", "openai")).lower()
+  chat_api_key = (_setting("chat_api_key", None)
+                  or _setting("openai_api_key", ""))
+  chat_base_url = _setting("chat_base_url", None)
+  if not chat_base_url:
+    if chat_provider in ("dashscope", "qwen", "aliyun"):
+      chat_base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    elif chat_provider in ("moonshot", "kimi"):
+      chat_base_url = "https://api.moonshot.cn/v1"
+    else:
+      chat_base_url = "https://api.openai.com/v1"
+
+  default_chat_model = _setting("chat_model", None)
+  if not default_chat_model:
+    if chat_provider in ("dashscope", "qwen", "aliyun"):
+      default_chat_model = "qwen-plus"
+    else:
+      default_chat_model = "gpt-3.5-turbo"
+
+  advanced_chat_model = (_setting("chat_model_advanced", None)
+                         or _setting("chat_advanced_model", None))
+  if not advanced_chat_model:
+    if chat_provider in ("dashscope", "qwen", "aliyun"):
+      advanced_chat_model = default_chat_model
+    else:
+      advanced_chat_model = "gpt-4"
+
+  embedding_provider = str(_setting("embedding_provider", chat_provider)).lower()
+  embedding_api_key = (_setting("embedding_api_key", None)
+                       or chat_api_key)
+  embedding_base_url = _setting("embedding_base_url", None)
+  if not embedding_base_url:
+    if embedding_provider in ("dashscope", "qwen", "aliyun"):
+      embedding_base_url = ("https://dashscope.aliyuncs.com/api/v1/services/"
+                            "embeddings/text-embedding/text-embedding")
+    else:
+      embedding_base_url = "https://api.openai.com/v1"
+
+  embedding_model = _setting("embedding_model", None)
+  if not embedding_model:
+    if embedding_provider in ("dashscope", "qwen", "aliyun"):
+      embedding_model = "text-embedding-v4"
+    else:
+      embedding_model = "text-embedding-ada-002"
+
+  timeout_sec = int(_setting("request_timeout_sec", 60))
+  debug_llm = bool(_setting("debug_llm", _setting("debug", False)))
+
+  return {
+    "chat": {
+      "provider": chat_provider,
+      "api_key": chat_api_key,
+      "base_url": chat_base_url,
+      "model": default_chat_model,
+      "advanced_model": advanced_chat_model,
+      "timeout_sec": timeout_sec,
+      "debug": debug_llm,
+    },
+    "embedding": {
+      "provider": embedding_provider,
+      "api_key": embedding_api_key,
+      "base_url": embedding_base_url,
+      "model": embedding_model,
+      "timeout_sec": timeout_sec,
+      "debug": debug_llm,
+    }
+  }
+
+
+def get_embedding_runtime_metadata():
+  config = _build_ai_config()["embedding"]
+  return {
+    "embedding_provider": config["provider"],
+    "embedding_model": config["model"],
+    "embedding_schema_version": int(_setting("embedding_schema_version", 1)),
+  }
+
+
+def get_chat_runtime_metadata():
+  config = _build_ai_config()["chat"]
+  return {
+    "chat_provider": config["provider"],
+    "chat_model": config["model"],
+    "chat_model_advanced": config["advanced_model"],
+  }
+
+
+def get_ai_runtime_audit_metadata():
+  return {
+    "chat": get_chat_runtime_metadata(),
+    "embedding": get_embedding_runtime_metadata(),
+    "policy": {
+      "embedding_mixing_policy": get_embedding_mixing_policy(),
+    }
+  }
+
+
+def get_embedding_mixing_policy():
+  return str(_setting("embedding_mixing_policy", "forbid")).lower()
+
+
+def _simulation_has_saved_embeddings(sim_folder):
+  personas_root = os.path.join(sim_folder, "personas")
+  if not os.path.isdir(personas_root):
+    return False
+
+  for root, _, files in os.walk(personas_root):
+    if "embeddings.json" not in files:
+      continue
+    embeddings_path = os.path.join(root, "embeddings.json")
+    try:
+      if os.path.getsize(embeddings_path) > 2:
+        return True
+    except OSError:
+      pass
+  return False
+
+
+def _infer_saved_embedding_metadata(reverie_meta, sim_folder):
+  provider = reverie_meta.get("embedding_provider")
+  model = reverie_meta.get("embedding_model")
+  if provider and model:
+    return {
+      "embedding_provider": provider,
+      "embedding_model": model,
+      "embedding_schema_version": int(
+        reverie_meta.get("embedding_schema_version",
+                         _setting("embedding_schema_version", 1))),
+    }
+
+  if _simulation_has_saved_embeddings(sim_folder):
+    return {
+      "embedding_provider": "openai",
+      "embedding_model": "text-embedding-ada-002",
+      "embedding_schema_version": 1,
+    }
+
+  return None
+
+
+def get_saved_embedding_metadata(reverie_meta, sim_folder):
+  saved_meta = _infer_saved_embedding_metadata(reverie_meta, sim_folder)
+  if saved_meta is None:
+    return None
+  return dict(saved_meta)
+
+
+def get_embedding_compatibility_report(reverie_meta, sim_folder):
+  current_meta = get_embedding_runtime_metadata()
+  saved_meta = _infer_saved_embedding_metadata(reverie_meta, sim_folder)
+  has_saved_embeddings = _simulation_has_saved_embeddings(sim_folder)
+  metadata_explicit = bool(
+    reverie_meta.get("embedding_provider") and reverie_meta.get("embedding_model")
+  )
+
+  mismatch = False
+  if saved_meta is not None:
+    mismatch = (
+      saved_meta["embedding_provider"] != current_meta["embedding_provider"]
+      or saved_meta["embedding_model"] != current_meta["embedding_model"]
+    )
+
+  if saved_meta is None:
+    status = "missing_saved_embedding_metadata"
+  elif mismatch:
+    status = "mismatch"
+  else:
+    status = "compatible"
+
+  return {
+    "status": status,
+    "mixing_policy": get_embedding_mixing_policy(),
+    "has_saved_embeddings": has_saved_embeddings,
+    "saved_embedding": dict(saved_meta) if saved_meta else None,
+    "current_embedding": current_meta,
+    "metadata_explicit": metadata_explicit,
+    "inferred_legacy_metadata": (
+      saved_meta is not None and has_saved_embeddings and not metadata_explicit
+    ),
+  }
+
+
+def ensure_embedding_metadata_compatible(reverie_meta, sim_folder):
+  current_meta = get_embedding_runtime_metadata()
+  saved_meta = _infer_saved_embedding_metadata(reverie_meta, sim_folder)
+
+  if saved_meta is None:
+    changed = False
+    for key, value in current_meta.items():
+      if reverie_meta.get(key) != value:
+        reverie_meta[key] = value
+        changed = True
+    return changed
+
+  mismatch = (
+    saved_meta["embedding_provider"] != current_meta["embedding_provider"]
+    or saved_meta["embedding_model"] != current_meta["embedding_model"]
+  )
+
+  if mismatch:
+    message = (
+      "Embedding configuration mismatch detected. "
+      f"Simulation expects {saved_meta['embedding_provider']}/"
+      f"{saved_meta['embedding_model']}, but current config is "
+      f"{current_meta['embedding_provider']}/"
+      f"{current_meta['embedding_model']}."
+    )
+    if get_embedding_mixing_policy() == "forbid":
+      raise RuntimeError(
+        message
+        + " Refusing to continue to avoid mixing vector spaces. "
+        + "Update utils.py to match the simulation, or rebuild the saved "
+        + "embeddings before using a new embedding model."
+      )
+    print("[Embedding WARNING]", message)
+
+  changed = False
+  for key, value in saved_meta.items():
+    if reverie_meta.get(key) != value:
+      reverie_meta[key] = value
+      changed = True
+  return changed
+
+
+def _ensure_clients():
+  global _chat_client
+  global _embedding_client
+  global _client_signature
+
+  config = _build_ai_config()
+  signature = json.dumps(config, sort_keys=True)
+  if signature == _client_signature and _chat_client and _embedding_client:
+    return
+
+  _chat_client = ChatClient(config["chat"])
+  _embedding_client = EmbeddingClient(config["embedding"])
+  _client_signature = signature
+
+
+def _get_chat_client():
+  _ensure_clients()
+  return _chat_client
+
+
+def _get_embedding_client():
+  _ensure_clients()
+  return _embedding_client
+
+
+def _resolve_default_chat_model():
+  _ensure_clients()
+  return _chat_client.default_model
+
+
+def _resolve_advanced_chat_model():
+  _ensure_clients()
+  return _chat_client.advanced_model
+
+
+def _map_legacy_engine(engine):
+  if not engine:
+    return _resolve_default_chat_model()
+
+  lowered = str(engine).lower()
+  if lowered in ("gpt-4", "gpt-4o", "gpt-4-turbo"):
+    return _resolve_advanced_chat_model()
+  if lowered.startswith("gpt-"):
+    return engine
+  return _resolve_default_chat_model()
+
+
+def _describe_ai_error(exc):
+  if isinstance(exc, AIClientError):
+    return f"{exc.category}: {exc}"
+  return str(exc)
+
+
 def ChatGPT_single_request(prompt): 
   temp_sleep()
-
-  completion = openai.ChatCompletion.create(
-    model="gpt-3.5-turbo", 
-    messages=[{"role": "user", "content": prompt}]
-  )
-  return completion["choices"][0]["message"]["content"]
+  return _get_chat_client().complete(prompt, model=_resolve_default_chat_model())
 
 
 # ============================================================================
@@ -45,14 +327,9 @@ def GPT4_request(prompt):
   temp_sleep()
 
   try: 
-    completion = openai.ChatCompletion.create(
-    model="gpt-4", 
-    messages=[{"role": "user", "content": prompt}]
-    )
-    return completion["choices"][0]["message"]["content"]
-  
-  except: 
-    print ("ChatGPT ERROR")
+    return _get_chat_client().complete(prompt, model=_resolve_advanced_chat_model())
+  except Exception as exc: 
+    print ("ChatGPT ERROR", _describe_ai_error(exc))
     return "ChatGPT ERROR"
 
 
@@ -70,14 +347,9 @@ def ChatGPT_request(prompt):
   """
   # temp_sleep()
   try: 
-    completion = openai.ChatCompletion.create(
-    model="gpt-3.5-turbo", 
-    messages=[{"role": "user", "content": prompt}]
-    )
-    return completion["choices"][0]["message"]["content"]
-  
-  except: 
-    print ("ChatGPT ERROR")
+    return _get_chat_client().complete(prompt, model=_resolve_default_chat_model())
+  except Exception as exc: 
+    print ("ChatGPT ERROR", _describe_ai_error(exc))
     return "ChatGPT ERROR"
 
 
@@ -196,8 +468,8 @@ def ChatGPT_safe_generate_response_OLD(prompt,
 
 def GPT_request(prompt, gpt_parameter): 
   """
-  Given a prompt and a dictionary of GPT parameters, make a request to OpenAI
-  server and returns the response. 
+  Given a prompt and a dictionary of legacy GPT parameters, route the request
+  through the configured chat provider.
   ARGS:
     prompt: a str prompt
     gpt_parameter: a python dictionary with the keys indicating the names of  
@@ -208,19 +480,16 @@ def GPT_request(prompt, gpt_parameter):
   """
   temp_sleep()
   try: 
-    response = openai.Completion.create(
-                model=gpt_parameter["engine"],
-                prompt=prompt,
-                temperature=gpt_parameter["temperature"],
-                max_tokens=gpt_parameter["max_tokens"],
-                top_p=gpt_parameter["top_p"],
-                frequency_penalty=gpt_parameter["frequency_penalty"],
-                presence_penalty=gpt_parameter["presence_penalty"],
-                stream=gpt_parameter["stream"],
-                stop=gpt_parameter["stop"],)
-    return response.choices[0].text
-  except: 
-    print ("TOKEN LIMIT EXCEEDED")
+    request_model = _map_legacy_engine(gpt_parameter.get("engine"))
+    return _get_chat_client().complete(
+      prompt,
+      model=request_model,
+      temperature=gpt_parameter.get("temperature"),
+      max_tokens=gpt_parameter.get("max_tokens"),
+      stop=gpt_parameter.get("stop"),
+    )
+  except Exception as exc: 
+    print ("TOKEN LIMIT EXCEEDED", _describe_ai_error(exc))
     return "TOKEN LIMIT EXCEEDED"
 
 
@@ -277,8 +546,10 @@ def get_embedding(text, model="text-embedding-ada-002"):
   text = text.replace("\n", " ")
   if not text: 
     text = "this is blank"
-  return openai.Embedding.create(
-          input=[text], model=model)['data'][0]['embedding']
+  request_model = model
+  if model == "text-embedding-ada-002":
+    request_model = None
+  return _get_embedding_client().embed_text(text, model=request_model)
 
 
 if __name__ == '__main__':
@@ -309,10 +580,6 @@ if __name__ == '__main__':
                                  True)
 
   print (output)
-
-
-
-
 
 
 

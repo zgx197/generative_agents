@@ -9,5 +9,23 @@
     "Maria Lopez",
     "Klaus Mueller"
   ],
-  "step": 4337
+  "step": 4337,
+  "embedding_provider": "qwen",
+  "embedding_model": "text-embedding-v4",
+  "embedding_schema_version": 1,
+  "ai_runtime": {
+    "chat": {
+      "chat_provider": "qwen",
+      "chat_model": "qwen-plus",
+      "chat_model_advanced": "qwen-plus"
+    },
+    "embedding": {
+      "embedding_provider": "qwen",
+      "embedding_model": "text-embedding-v4",
+      "embedding_schema_version": 1
+    },
+    "policy": {
+      "embedding_mixing_policy": "forbid"
+    }
+  }
 }

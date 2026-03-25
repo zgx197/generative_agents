@@ -18,6 +18,7 @@ term "personas" to refer to generative agents, "associative memory" to refer
 to the memory stream, and "reverie" to refer to the overarching simulation 
 framework.
 """
+import argparse
 import json
 import numpy
 import datetime
@@ -28,12 +29,16 @@ import os
 import shutil
 import traceback
 
-from selenium import webdriver
+try:
+  from selenium import webdriver
+except ImportError:
+  webdriver = None
 
 from global_methods import *
 from utils import *
 from maze import *
 from persona.persona import *
+from persona.prompt_template.gpt_structure import *
 
 ##############################################################################
 #                                  REVERIE                                   #
@@ -60,8 +65,11 @@ class ReverieServer:
     with open(f"{sim_folder}/reverie/meta.json") as json_file:  
       reverie_meta = json.load(json_file)
 
+    ensure_embedding_metadata_compatible(reverie_meta, sim_folder)
+
     with open(f"{sim_folder}/reverie/meta.json", "w") as outfile: 
       reverie_meta["fork_sim_code"] = fork_sim_code
+      reverie_meta["ai_runtime"] = get_ai_runtime_audit_metadata()
       outfile.write(json.dumps(reverie_meta, indent=2))
 
     # LOADING REVERIE'S GLOBAL VARIABLES
@@ -177,6 +185,8 @@ class ReverieServer:
     reverie_meta["maze_name"] = self.maze.maze_name
     reverie_meta["persona_names"] = list(self.personas.keys())
     reverie_meta["step"] = self.step
+    reverie_meta.update(get_embedding_runtime_metadata())
+    reverie_meta["ai_runtime"] = get_ai_runtime_audit_metadata()
     reverie_meta_f = f"{sim_folder}/reverie/meta.json"
     with open(reverie_meta_f, "w") as outfile: 
       outfile.write(json.dumps(reverie_meta, indent=2))
@@ -465,7 +475,7 @@ class ReverieServer:
           # Runs the number of steps specified in the prompt.
           # Example: run 1000
           int_count = int(sim_command.split()[-1])
-          rs.start_server(int_count)
+          self.start_server(int_count)
 
         elif ("print persona schedule" 
               in sim_command[:22].lower()): 
@@ -605,16 +615,26 @@ if __name__ == '__main__':
   #                    "July1_the_ville_isabella_maria_klaus-step-3-21")
   # rs.open_server()
 
-  origin = input("Enter the name of the forked simulation: ").strip()
-  target = input("Enter the name of the new simulation: ").strip()
+  parser = argparse.ArgumentParser(
+      description="Start the Reverie simulation server."
+  )
+  parser.add_argument(
+      "--forked-sim",
+      dest="forked_sim",
+      help="Existing simulation folder to fork from.",
+  )
+  parser.add_argument(
+      "--new-sim",
+      dest="new_sim",
+      help="New simulation folder name to create.",
+  )
+  args = parser.parse_args()
+
+  origin = args.forked_sim or input("Enter the name of the forked simulation: ").strip()
+  target = args.new_sim or input("Enter the name of the new simulation: ").strip()
 
   rs = ReverieServer(origin, target)
   rs.open_server()
-
-
-
-
-
 
 
 
