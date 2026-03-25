@@ -17,6 +17,66 @@ from global_methods import *
 from django.templatetags.static import static
 from .models import *
 
+
+SIMULATION_STATUS_FILE = "temp_storage/simulation_status.json"
+
+
+def _default_simulation_status():
+  return {
+    "simulation": {
+      "sim_code": None,
+      "fork_sim_code": None,
+    },
+    "job": {
+      "job_id": None,
+      "state": "idle",
+      "requested_steps": 0,
+      "completed_steps": 0,
+      "current_world_step": 0,
+      "started_at": None,
+      "updated_at": None,
+      "stop_requested": False,
+    },
+    "progress": {
+      "current_persona": None,
+      "current_stage": "idle",
+      "current_prompt_type": None,
+      "current_time": None,
+    },
+    "last_error": None,
+  }
+
+
+def _load_simulation_status(requested_sim_code=None):
+  payload = _default_simulation_status()
+  status_file_present = check_if_file_exists(SIMULATION_STATUS_FILE)
+
+  if status_file_present:
+    try:
+      with open(SIMULATION_STATUS_FILE) as json_file:
+        loaded_payload = json.load(json_file)
+      if isinstance(loaded_payload, dict):
+        payload.update(loaded_payload)
+    except (OSError, ValueError, TypeError):
+      payload["job"]["state"] = "status_unavailable"
+      payload["last_error"] = {
+        "type": "StatusReadError",
+        "message": "Failed to read simulation_status.json",
+      }
+
+  matches_requested_simulation = True
+  active_sim_code = payload["simulation"].get("sim_code")
+  if requested_sim_code and active_sim_code:
+    matches_requested_simulation = (requested_sim_code == active_sim_code)
+
+  payload["meta"] = {
+    "status_file_present": status_file_present,
+    "requested_sim_code": requested_sim_code,
+    "matches_requested_simulation": matches_requested_simulation,
+  }
+  return payload
+
+
 def landing(request): 
   context = {}
   template = "landing/landing.html"
@@ -295,6 +355,11 @@ def update_environment(request):
   return JsonResponse(response_data)
 
 
+def simulation_status(request):
+  requested_sim_code = request.GET.get("sim_code")
+  return JsonResponse(_load_simulation_status(requested_sim_code))
+
+
 def path_tester_update(request): 
   """
   Processing the path and saving it to path_tester_env.json temp storage for 
@@ -312,7 +377,6 @@ def path_tester_update(request):
     outfile.write(json.dumps(camera, indent=2))
 
   return HttpResponse("received")
-
 
 
 

@@ -8,6 +8,59 @@
 	<div id="game-container" style="text-align: center"></div>
 
 	<div style="width:55%; margin: 0 auto; margin-top:4.5em">
+		{% if mode == 'simulate' %}
+		<div class="panel panel-default" id="simulation-status-panel" style="border-color:#D6D6D6; box-shadow:none; margin-bottom:2em">
+			<div class="panel-heading" style="background:#F7F7F7">
+				<strong>Simulation Run Status</strong>
+			</div>
+			<div class="panel-body">
+				<div class="row">
+					<div class="col-md-4" style="margin-bottom:0.8em">
+						<div style="font-size:0.95em; color:#666666">State</div>
+						<div><span id="simulation-status-state" class="label label-default" style="font-size:0.95em">idle</span></div>
+					</div>
+					<div class="col-md-4" style="margin-bottom:0.8em">
+						<div style="font-size:0.95em; color:#666666">Progress</div>
+						<div id="simulation-status-progress" style="font-size:1.1em">0 / 0</div>
+					</div>
+					<div class="col-md-4" style="margin-bottom:0.8em">
+						<div style="font-size:0.95em; color:#666666">World Step</div>
+						<div id="simulation-status-world-step" style="font-size:1.1em">-</div>
+					</div>
+				</div>
+				<div class="row">
+					<div class="col-md-4" style="margin-bottom:0.8em">
+						<div style="font-size:0.95em; color:#666666">Current Persona</div>
+						<div id="simulation-status-persona" style="font-size:1.1em">-</div>
+					</div>
+					<div class="col-md-4" style="margin-bottom:0.8em">
+						<div style="font-size:0.95em; color:#666666">Current Stage</div>
+						<div id="simulation-status-stage" style="font-size:1.1em">idle</div>
+					</div>
+					<div class="col-md-4" style="margin-bottom:0.8em">
+						<div style="font-size:0.95em; color:#666666">Stop Requested</div>
+						<div id="simulation-status-stop-requested" style="font-size:1.1em">False</div>
+					</div>
+				</div>
+				<div class="row">
+					<div class="col-md-6" style="margin-bottom:0.8em">
+						<div style="font-size:0.95em; color:#666666">Simulation</div>
+						<div id="simulation-status-sim" style="font-size:1.1em">-</div>
+					</div>
+					<div class="col-md-6" style="margin-bottom:0.8em">
+						<div style="font-size:0.95em; color:#666666">Last Updated</div>
+						<div id="simulation-status-updated" style="font-size:1.1em">-</div>
+					</div>
+				</div>
+				<div id="simulation-status-note" class="text-muted" style="font-size:0.95em">Waiting for backend status...</div>
+				<div id="simulation-status-error-wrapper" class="alert alert-danger" style="display:none; margin-top:1em; margin-bottom:0">
+					<strong>Last Error:</strong>
+					<div id="simulation-status-error" style="margin-top:0.4em; white-space:pre-wrap"></div>
+				</div>
+			</div>
+		</div>
+		{% endif %}
+
 		<h3 style="margin-bottom:-0.5em; font-size:1.5em">Current Time:</h3>
 		<div class="row">
 			<div class="col-md-8" id="game-time" style="">

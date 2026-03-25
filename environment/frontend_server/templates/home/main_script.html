@@ -2,6 +2,7 @@
 
 <div id="step" style="display:none">{{step}}</div>
 <div id="sim_code" style="display:none">{{sim_code}}</div>
+<div id="page_mode" style="display:none">{{mode}}</div>
 <div id="persona_name_list" style="display:none">{{persona_name_str}}</div>
 <div id="persona_init_pos" style="display:none">
 	{% for i in persona_init_pos %}
@@ -31,6 +32,8 @@
 	// a step. We use this to link the steps in the backend. 
 	let step = parseInt(document.getElementById('step').innerHTML);
 	let sim_code = document.getElementById('sim_code').innerHTML;
+	let page_mode = document.getElementById('page_mode').innerHTML;
+	let is_simulation_mode = page_mode == "simulate";
 	// let persona_names = document.getElementById('persona_name_list').innerHTML.split(",");
 
 	let spans = document.getElementById('persona_init_pos').getElementsByTagName('span');
@@ -120,6 +123,152 @@
 	let execute_count_max = tile_width/movement_speed;
 	let execute_count = execute_count_max;
 	let movement_target = {};
+	let simulation_status_request_in_flight = false;
+
+
+	function set_text_content(element_id, value) {
+		let node = document.getElementById(element_id);
+		if (node) {
+			node.textContent = value;
+		}
+	}
+
+
+	function format_status_note(payload) {
+		if (!payload || !payload.job || !payload.progress) {
+			return "Simulation status is unavailable.";
+		}
+
+		if (payload.meta && payload.meta.matches_requested_simulation === false) {
+			let active_sim_code = "-";
+			if (payload.simulation && payload.simulation.sim_code) {
+				active_sim_code = payload.simulation.sim_code;
+			}
+			return "Backend status currently belongs to another simulation: " + active_sim_code;
+		}
+
+		let state = payload.job.state || "idle";
+		let stage = payload.progress.current_stage || "idle";
+		if (state == "running" || state == "queued" || state == "cancelling") {
+			return "Backend worker is active. Current stage: " + stage;
+		}
+		if (state == "failed") {
+			return "The latest run job failed. Check the backend log or the error summary below.";
+		}
+		if (state == "completed") {
+			return "The latest run job completed. The frontend should continue consuming movement files.";
+		}
+		if (state == "stopped") {
+			return "The latest run job was stopped gracefully.";
+		}
+		if (state == "status_unavailable") {
+			return "Status file exists but could not be read.";
+		}
+		return "No active backend run job.";
+	}
+
+
+	function render_simulation_status(payload) {
+		let panel = document.getElementById("simulation-status-panel");
+		if (!panel || !is_simulation_mode) {
+			return;
+		}
+
+		let state_node = document.getElementById("simulation-status-state");
+		let error_wrapper = document.getElementById("simulation-status-error-wrapper");
+		let state = "idle";
+		let progress = "0 / 0";
+		let world_step = "-";
+		let current_persona = "-";
+		let current_stage = "idle";
+		let stop_requested = "False";
+		let sim_label = sim_code;
+		let updated_at = "-";
+		let note = "Simulation status is unavailable.";
+		let error_text = "";
+
+		if (payload && payload.job && payload.progress && payload.simulation) {
+			state = payload.job.state || "idle";
+			progress = (payload.job.completed_steps || 0) + " / " + (payload.job.requested_steps || 0);
+			world_step = payload.job.current_world_step;
+			current_persona = payload.progress.current_persona || "-";
+			current_stage = payload.progress.current_stage || "idle";
+			stop_requested = payload.job.stop_requested ? "True" : "False";
+			sim_label = payload.simulation.sim_code || sim_code;
+			updated_at = payload.job.updated_at || "-";
+			note = format_status_note(payload);
+
+			if (payload.last_error) {
+				error_text = (payload.last_error.type || "Error") + ": " + (payload.last_error.message || "");
+			}
+
+			if (payload.progress.current_time && phase != "execute") {
+				document.getElementById("game-time-content").innerHTML = payload.progress.current_time;
+			}
+		}
+
+		let state_class = "label label-default";
+		if (state == "running") state_class = "label label-primary";
+		else if (state == "queued") state_class = "label label-info";
+		else if (state == "cancelling") state_class = "label label-warning";
+		else if (state == "completed") state_class = "label label-success";
+		else if (state == "stopped") state_class = "label label-warning";
+		else if (state == "failed" || state == "status_unavailable") state_class = "label label-danger";
+
+		state_node.className = state_class;
+		state_node.textContent = state;
+		set_text_content("simulation-status-progress", progress);
+		set_text_content("simulation-status-world-step", world_step);
+		set_text_content("simulation-status-persona", current_persona);
+		set_text_content("simulation-status-stage", current_stage);
+		set_text_content("simulation-status-stop-requested", stop_requested);
+		set_text_content("simulation-status-sim", sim_label);
+		set_text_content("simulation-status-updated", updated_at);
+		set_text_content("simulation-status-note", note);
+		set_text_content("simulation-status-error", error_text);
+
+		if (error_wrapper) {
+			error_wrapper.style.display = error_text ? "block" : "none";
+		}
+	}
+
+
+	function fetch_simulation_status() {
+		if (!is_simulation_mode || simulation_status_request_in_flight) {
+			return;
+		}
+
+		simulation_status_request_in_flight = true;
+		var status_xobj = new XMLHttpRequest();
+		status_xobj.overrideMimeType("application/json");
+		status_xobj.open(
+			'GET',
+			"{% url 'simulation_status' %}?sim_code=" + encodeURIComponent(sim_code),
+			true
+		);
+		status_xobj.addEventListener("load", function() {
+			simulation_status_request_in_flight = false;
+			if (this.readyState === 4 && status_xobj.status === 200) {
+				render_simulation_status(JSON.parse(status_xobj.responseText));
+			}
+		});
+		status_xobj.addEventListener("error", function() {
+			simulation_status_request_in_flight = false;
+			render_simulation_status({
+				"job": {"state": "status_unavailable", "completed_steps": 0, "requested_steps": 0, "current_world_step": "-",
+								"stop_requested": false, "updated_at": "-"},
+				"progress": {"current_persona": "-", "current_stage": "idle"},
+				"simulation": {"sim_code": sim_code},
+				"last_error": {"type": "StatusFetchError", "message": "Failed to reach /simulation_status/."}
+			});
+		});
+		status_xobj.send();
+	}
+
+	if (is_simulation_mode) {
+		fetch_simulation_status();
+		window.setInterval(fetch_simulation_status, 1500);
+	}
 	
 
 	// ###########################################################################
@@ -551,7 +700,6 @@
 	var play_button=document.getElementById("play_button");
 	var pause_button=document.getElementById("pause_button");
 </script>
-
 
 
 

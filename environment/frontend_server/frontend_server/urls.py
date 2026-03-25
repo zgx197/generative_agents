@@ -28,6 +28,7 @@ urlpatterns = [
     re_path(r'^replay_persona_state/(?P<sim_code>[\w-]+)/(?P<step>[\w-]+)/(?P<persona_name>[\w-]+)/$', translator_views.replay_persona_state, name='replay_persona_state'),
     re_path(r'^process_environment/$', translator_views.process_environment, name='process_environment'),
     re_path(r'^update_environment/$', translator_views.update_environment, name='update_environment'),
+    re_path(r'^simulation_status/$', translator_views.simulation_status, name='simulation_status'),
     re_path(r'^path_tester/$', translator_views.path_tester, name='path_tester'),
     re_path(r'^path_tester_update/$', translator_views.path_tester_update, name='path_tester_update'),
     path('admin/', admin.site.urls),
