@@ -6,6 +6,7 @@ import os
 import string
 import random
 import json
+import uuid
 from os import listdir
 import os
 
@@ -19,6 +20,19 @@ from .models import *
 
 
 SIMULATION_STATUS_FILE = "temp_storage/simulation_status.json"
+SIMULATION_COMMAND_QUEUE_DIR = "temp_storage/command_queue"
+SIMULATION_COMMAND_RESULT_FILE = "temp_storage/command_result.json"
+
+
+def _write_json_atomic(path, payload):
+  parent_dir = os.path.dirname(path)
+  if parent_dir:
+    os.makedirs(parent_dir, exist_ok=True)
+
+  tmp_path = f"{path}.{uuid.uuid4().hex}.tmp"
+  with open(tmp_path, "w", encoding="utf-8") as outfile:
+    outfile.write(json.dumps(payload, indent=2))
+  os.replace(tmp_path, path)
 
 
 def _default_simulation_status():
@@ -72,6 +86,50 @@ def _load_simulation_status(requested_sim_code=None):
   payload["meta"] = {
     "status_file_present": status_file_present,
     "requested_sim_code": requested_sim_code,
+    "matches_requested_simulation": matches_requested_simulation,
+  }
+  return payload
+
+
+def _default_command_result(requested_sim_code=None):
+  return {
+    "sim_code": requested_sim_code,
+    "command_id": None,
+    "command": None,
+    "source": None,
+    "state": "idle",
+    "output": "",
+    "error": None,
+    "created_at": None,
+    "completed_at": None,
+  }
+
+
+def _load_command_result(requested_sim_code=None):
+  payload = _default_command_result(requested_sim_code)
+  if not check_if_file_exists(SIMULATION_COMMAND_RESULT_FILE):
+    payload["meta"] = {
+      "result_file_present": False,
+      "matches_requested_simulation": True,
+    }
+    return payload
+
+  try:
+    with open(SIMULATION_COMMAND_RESULT_FILE, "r", encoding="utf-8") as result_file:
+      loaded_payload = json.load(result_file)
+    if isinstance(loaded_payload, dict):
+      payload.update(loaded_payload)
+  except (OSError, ValueError, TypeError):
+    payload["state"] = "failed"
+    payload["error"] = "Failed to read command_result.json"
+
+  matches_requested_simulation = True
+  active_sim_code = payload.get("sim_code")
+  if requested_sim_code and active_sim_code:
+    matches_requested_simulation = (requested_sim_code == active_sim_code)
+
+  payload["meta"] = {
+    "result_file_present": True,
     "matches_requested_simulation": matches_requested_simulation,
   }
   return payload
@@ -360,6 +418,46 @@ def simulation_status(request):
   return JsonResponse(_load_simulation_status(requested_sim_code))
 
 
+def simulation_command(request):
+  if request.method != "POST":
+    return JsonResponse({"error": "POST required."}, status=405)
+
+  try:
+    data = json.loads(request.body or "{}")
+  except ValueError:
+    return JsonResponse({"error": "Invalid JSON body."}, status=400)
+
+  sim_code = str(data.get("sim_code", "")).strip()
+  command = str(data.get("command", "")).strip()
+  if not sim_code:
+    return JsonResponse({"error": "sim_code is required."}, status=400)
+  if not command:
+    return JsonResponse({"error": "command is required."}, status=400)
+
+  command_id = f"web-{uuid.uuid4().hex[:12]}"
+  payload = {
+    "command_id": command_id,
+    "sim_code": sim_code,
+    "command": command,
+    "source": "web",
+    "created_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+  }
+  queue_file = os.path.join(SIMULATION_COMMAND_QUEUE_DIR, f"{payload['created_at'].replace(':', '').replace('+', '_')}-{command_id}.json")
+  _write_json_atomic(queue_file, payload)
+
+  return JsonResponse({
+    "accepted": True,
+    "command_id": command_id,
+    "command": command,
+    "sim_code": sim_code,
+  })
+
+
+def simulation_command_result(request):
+  requested_sim_code = request.GET.get("sim_code")
+  return JsonResponse(_load_command_result(requested_sim_code))
+
+
 def path_tester_update(request): 
   """
   Processing the path and saving it to path_tester_env.json temp storage for 
@@ -377,7 +475,6 @@ def path_tester_update(request):
     outfile.write(json.dumps(camera, indent=2))
 
   return HttpResponse("received")
-
 
 
 
