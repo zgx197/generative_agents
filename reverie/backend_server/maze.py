@@ -324,6 +324,62 @@ class Maze:
     return nearby_tiles
 
 
+  def is_in_bounds(self, tile):
+    x, y = tile
+    return (0 <= x < self.maze_width) and (0 <= y < self.maze_height)
+
+
+  def is_standable_tile(self, tile, allow_game_object=False):
+    if not self.is_in_bounds(tile):
+      return False
+    tile_det = self.access_tile(tile)
+    if tile_det["collision"]:
+      return False
+    if not allow_game_object and tile_det["game_object"]:
+      return False
+    return True
+
+
+  def find_nearest_standable_tile(self,
+                                  tile,
+                                  same_world=True,
+                                  same_sector=False,
+                                  same_arena=False,
+                                  allow_game_object=False,
+                                  max_radius=6):
+    if not self.is_in_bounds(tile):
+      return tile
+
+    origin_det = self.access_tile(tile)
+    if self.is_standable_tile(tile, allow_game_object=allow_game_object):
+      return tile
+
+    x, y = tile
+    for radius in range(1, max_radius + 1):
+      candidates = []
+      for dx in range(-radius, radius + 1):
+        for dy in range(-radius, radius + 1):
+          if max(abs(dx), abs(dy)) != radius:
+            continue
+          cand = (x + dx, y + dy)
+          if not self.is_standable_tile(cand,
+                                        allow_game_object=allow_game_object):
+            continue
+          cand_det = self.access_tile(cand)
+          if same_world and cand_det["world"] != origin_det["world"]:
+            continue
+          if same_sector and cand_det["sector"] != origin_det["sector"]:
+            continue
+          if same_arena and cand_det["arena"] != origin_det["arena"]:
+            continue
+          candidates += [cand]
+      if candidates:
+        candidates.sort(key=lambda i: (abs(i[0] - x) + abs(i[1] - y), i[1], i[0]))
+        return candidates[0]
+
+    return tile
+
+
   def add_event_from_tile(self, curr_event, tile): 
     """
     Add an event triple to a tile.  
@@ -380,7 +436,6 @@ class Maze:
     for event in curr_tile_ev_cp: 
       if event[0] == subject:  
         self.tiles[tile[1]][tile[0]]["events"].remove(event)
-
 
 
 

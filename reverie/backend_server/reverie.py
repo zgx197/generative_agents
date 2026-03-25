@@ -27,10 +27,13 @@ import io
 import time
 import math
 import os
+import queue
 import shutil
 import sys
 import threading
 import traceback
+import uuid
+from collections import deque
 
 try:
   from selenium import webdriver
@@ -74,6 +77,60 @@ class _TeeStream(io.TextIOBase):
     return bool(getattr(self._primary_stream, "isatty", lambda: False)())
 
 
+class _LineLimitedMirrorStream(io.TextIOBase):
+  def __init__(self, log_path, max_lines=2000, trim_check_interval=200):
+    self._log_path = log_path
+    self._max_lines = max(1, int(max_lines))
+    self._trim_check_interval = max(1, int(trim_check_interval))
+    self._pending_line_count = 0
+    self._stream = open(log_path, "a", encoding="utf-8", buffering=1)
+    self._trim_file(force=True)
+
+  @property
+  def encoding(self):
+    return getattr(self._stream, "encoding", "utf-8")
+
+  def write(self, data):
+    if not isinstance(data, str):
+      data = str(data)
+    self._stream.write(data)
+    self._stream.flush()
+    self._pending_line_count += data.count("\n")
+    if self._pending_line_count >= self._trim_check_interval:
+      self._pending_line_count = 0
+      self._trim_file(force=False)
+    return len(data)
+
+  def flush(self):
+    self._stream.flush()
+
+  def _trim_file(self, force=False):
+    if not os.path.exists(self._log_path):
+      return
+
+    overflow = False
+    tail = deque(maxlen=self._max_lines)
+    with open(self._log_path, "r", encoding="utf-8", errors="replace") as infile:
+      for line in infile:
+        if len(tail) == self._max_lines:
+          overflow = True
+        tail.append(line)
+
+    if not force and not overflow:
+      return
+
+    self._stream.flush()
+    self._stream.close()
+    try:
+      tmp_path = self._log_path + ".tmp"
+      with open(tmp_path, "w", encoding="utf-8") as outfile:
+        outfile.writelines(tail)
+      os.replace(tmp_path, self._log_path)
+    except PermissionError:
+      pass
+    self._stream = open(self._log_path, "a", encoding="utf-8", buffering=1)
+
+
 def _install_process_logging():
   log_path = os.getenv("GA_BACKEND_LOG_PATH")
   if not log_path:
@@ -85,7 +142,13 @@ def _install_process_logging():
   if log_dir:
     os.makedirs(log_dir, exist_ok=True)
 
-  log_stream = open(log_path, "a", encoding="utf-8", buffering=1)
+  max_lines = int(os.getenv("GA_BACKEND_RUNTIME_LOG_MAX_LINES", "2000"))
+  trim_check_interval = int(os.getenv("GA_BACKEND_RUNTIME_LOG_CHECK_INTERVAL", "200"))
+  log_stream = _LineLimitedMirrorStream(
+    log_path,
+    max_lines=max_lines,
+    trim_check_interval=trim_check_interval,
+  )
   sys.stdout = _TeeStream(sys.stdout, log_stream)
   sys.stderr = _TeeStream(sys.stderr, log_stream)
   sys._ga_process_logging_installed = True
@@ -114,6 +177,7 @@ class ReverieServer:
     self.sim_code = sim_code
     sim_folder = f"{fs_storage}/{self.sim_code}"
     copyanything(fork_folder, sim_folder)
+    os.makedirs(f"{sim_folder}/movement", exist_ok=True)
 
     with open(f"{sim_folder}/reverie/meta.json") as json_file:  
       reverie_meta = json.load(json_file)
@@ -182,16 +246,35 @@ class ReverieServer:
     # Loading in all personas. 
     init_env_file = f"{sim_folder}/environment/{str(self.step)}.json"
     init_env = json.load(open(init_env_file))
+    init_env_updated = False
     for persona_name in reverie_meta['persona_names']: 
       persona_folder = f"{sim_folder}/personas/{persona_name}"
       p_x = init_env[persona_name]["x"]
       p_y = init_env[persona_name]["y"]
+      normalized_tile = self.maze.find_nearest_standable_tile(
+        (p_x, p_y),
+        same_world=True,
+        same_sector=True,
+        same_arena=True,
+        allow_game_object=False)
+      if normalized_tile != (p_x, p_y):
+        print(
+          f"[init-position] normalized {persona_name} "
+          f"from {(p_x, p_y)} to {normalized_tile}"
+        )
+        p_x, p_y = normalized_tile
+        init_env[persona_name]["x"] = p_x
+        init_env[persona_name]["y"] = p_y
+        init_env_updated = True
       curr_persona = Persona(persona_name, persona_folder)
 
       self.personas[persona_name] = curr_persona
       self.personas_tile[persona_name] = (p_x, p_y)
       self.maze.tiles[p_y][p_x]["events"].add(curr_persona.scratch
                                               .get_curr_event_and_desc())
+    if init_env_updated:
+      with open(init_env_file, "w") as outfile:
+        outfile.write(json.dumps(init_env, indent=2))
 
     # REVERIE SETTINGS PARAMETERS:  
     # <server_sleep> denotes the amount of time that our while loop rests each
@@ -216,12 +299,30 @@ class ReverieServer:
 
     # BACKGROUND RUN JOB STATE
     self.status_file_path = f"{fs_temp_storage}/simulation_status.json"
+    self.command_queue_dir = f"{fs_temp_storage}/command_queue"
+    self.command_result_file_path = f"{fs_temp_storage}/command_result.json"
     self._job_lock = threading.Lock()
     self._worker_thread = None
     self._job_heartbeat_interval_sec = float(os.getenv("GA_JOB_HEARTBEAT_SEC", "5"))
     self._job_heartbeat_stop = threading.Event()
     self._job_heartbeat_thread = None
     self._active_job = None
+    self._stdin_command_queue = queue.Queue()
+    self._stdin_reader_started = False
+    self._command_result_lock = threading.Lock()
+    self._server_exit_requested = False
+    os.makedirs(self.command_queue_dir, exist_ok=True)
+    self._write_command_result({
+      "sim_code": self.sim_code,
+      "command_id": None,
+      "command": None,
+      "source": None,
+      "state": "idle",
+      "output": "",
+      "error": None,
+      "created_at": None,
+      "completed_at": self._now_iso(),
+    })
     self._write_status_file()
 
 
@@ -309,10 +410,93 @@ class ReverieServer:
       with self._job_lock:
         snapshot = self._build_status_snapshot_locked()
 
-    tmp_path = self.status_file_path + ".tmp"
-    with open(tmp_path, "w") as outfile:
-      outfile.write(json.dumps(snapshot, indent=2))
-    os.replace(tmp_path, self.status_file_path)
+    status_dir = os.path.dirname(self.status_file_path)
+    if status_dir:
+      os.makedirs(status_dir, exist_ok=True)
+
+    payload = json.dumps(snapshot, indent=2)
+    last_error = None
+    for _ in range(5):
+      tmp_path = f"{self.status_file_path}.{uuid.uuid4().hex}.tmp"
+      try:
+        with open(tmp_path, "w", encoding="utf-8") as outfile:
+          outfile.write(payload)
+        os.replace(tmp_path, self.status_file_path)
+        return True
+      except PermissionError as exc:
+        last_error = exc
+        try:
+          if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        except OSError:
+          pass
+        time.sleep(0.05)
+      except OSError as exc:
+        last_error = exc
+        try:
+          if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        except OSError:
+          pass
+        break
+
+    if last_error:
+      print(
+        f"[status-file] warning: failed to update {self.status_file_path}: "
+        f"{type(last_error).__name__}: {last_error}"
+      )
+    return False
+
+
+  def _write_command_result(self, payload):
+    result_dir = os.path.dirname(self.command_result_file_path)
+    if result_dir:
+      os.makedirs(result_dir, exist_ok=True)
+
+    with self._command_result_lock:
+      data = dict(payload)
+      data.setdefault("sim_code", self.sim_code)
+      data.setdefault("command_id", None)
+      data.setdefault("command", None)
+      data.setdefault("source", None)
+      data.setdefault("state", "idle")
+      data.setdefault("output", "")
+      data.setdefault("error", None)
+      data.setdefault("created_at", None)
+      data.setdefault("completed_at", self._now_iso())
+
+      payload_str = json.dumps(data, indent=2)
+      last_error = None
+      for _ in range(5):
+        tmp_path = f"{self.command_result_file_path}.{uuid.uuid4().hex}.tmp"
+        try:
+          with open(tmp_path, "w", encoding="utf-8") as outfile:
+            outfile.write(payload_str)
+          os.replace(tmp_path, self.command_result_file_path)
+          return True
+        except PermissionError as exc:
+          last_error = exc
+          try:
+            if os.path.exists(tmp_path):
+              os.remove(tmp_path)
+          except OSError:
+            pass
+          time.sleep(0.05)
+        except OSError as exc:
+          last_error = exc
+          try:
+            if os.path.exists(tmp_path):
+              os.remove(tmp_path)
+          except OSError:
+            pass
+          break
+
+      if last_error:
+        print(
+          f"[command-result] warning: failed to update {self.command_result_file_path}: "
+          f"{type(last_error).__name__}: {last_error}"
+        )
+      return False
 
 
   def _job_is_active_locked(self):
@@ -455,6 +639,270 @@ class ReverieServer:
     if last_error:
       lines += [f"last error: {last_error.get('type', 'Error')}: {last_error.get('message', '')}"]
     return "\n".join(lines)
+
+
+  def _start_stdin_reader(self):
+    if self._stdin_reader_started:
+      return
+
+    def _reader_loop():
+      while not self._server_exit_requested:
+        try:
+          sim_command = input("Enter option: ")
+        except EOFError:
+          break
+        self._stdin_command_queue.put({
+          "command_id": f"terminal-{uuid.uuid4().hex[:10]}",
+          "command": sim_command,
+          "source": "terminal",
+          "created_at": self._now_iso(),
+        })
+
+    self._stdin_reader_started = True
+    reader = threading.Thread(
+      target=_reader_loop,
+      daemon=True,
+      name="reverie-stdin-reader",
+    )
+    reader.start()
+
+
+  def _poll_web_command(self):
+    os.makedirs(self.command_queue_dir, exist_ok=True)
+    candidates = sorted(
+      filename for filename in os.listdir(self.command_queue_dir)
+      if filename.endswith(".json")
+    )
+    for filename in candidates:
+      path = os.path.join(self.command_queue_dir, filename)
+      try:
+        with open(path, "r", encoding="utf-8") as command_file:
+          payload = json.load(command_file)
+      except (OSError, ValueError, TypeError):
+        try:
+          os.remove(path)
+        except OSError:
+          pass
+        continue
+
+      try:
+        os.remove(path)
+      except OSError:
+        pass
+
+      if not isinstance(payload, dict):
+        continue
+
+      command = str(payload.get("command", "")).strip()
+      if not command:
+        continue
+
+      requested_sim_code = payload.get("sim_code")
+      if requested_sim_code and requested_sim_code != self.sim_code:
+        self._write_command_result({
+          "sim_code": requested_sim_code,
+          "command_id": payload.get("command_id"),
+          "command": command,
+          "source": "web",
+          "state": "rejected",
+          "output": "",
+          "error": f"Command targeted simulation {requested_sim_code}, but active simulation is {self.sim_code}.",
+          "created_at": payload.get("created_at"),
+          "completed_at": self._now_iso(),
+        })
+        continue
+
+      payload["source"] = payload.get("source", "web")
+      return payload
+    return None
+
+
+  def _get_next_command(self):
+    try:
+      return self._stdin_command_queue.get_nowait()
+    except queue.Empty:
+      pass
+    return self._poll_web_command()
+
+
+  def _execute_server_command(self, sim_command, source="terminal", command_id=None, created_at=None):
+    sim_command = (sim_command or "").strip()
+    ret_str = ""
+    should_exit = False
+    command_lower = sim_command.lower()
+    sim_folder = f"{fs_storage}/{self.sim_code}"
+
+    try:
+      if command_lower in ["status", "jobs"]:
+        ret_str += self._format_run_status()
+
+      elif command_lower == "stop":
+        ret_str += self._request_stop_for_active_job()
+
+      elif self._has_active_run_job():
+        ret_str += (
+          "A background run job is active. "
+          "Only 'status', 'jobs', and 'stop' are available until it finishes."
+        )
+
+      elif command_lower in ["f", "fin", "finish", "save and finish"]:
+        self.save()
+        ret_str += "Saved simulation and finished session."
+        should_exit = True
+
+      elif command_lower == "start path tester mode":
+        shutil.rmtree(sim_folder)
+        self.start_path_tester_server()
+        ret_str += "Started path tester mode."
+        should_exit = True
+
+      elif command_lower == "exit":
+        shutil.rmtree(sim_folder)
+        ret_str += "Exited without saving and removed current simulation folder."
+        should_exit = True
+
+      elif command_lower == "save":
+        self.save()
+        ret_str += "Simulation saved."
+
+      elif sim_command[:3].lower() == "run":
+        parts = sim_command.split()
+        if len(parts) != 2:
+          raise ValueError("Usage: run <positive-step-count>")
+        int_count = int(parts[-1])
+        _, message = self._start_background_run(int_count)
+        ret_str += message
+
+      elif ("print persona schedule"
+            in sim_command[:22].lower()):
+        ret_str += (self.personas[" ".join(sim_command.split()[-2:])]
+                    .scratch.get_str_daily_schedule_summary())
+
+      elif ("print all persona schedule"
+            in sim_command[:26].lower()):
+        for persona_name, persona in self.personas.items():
+          ret_str += f"{persona_name}\n"
+          ret_str += f"{persona.scratch.get_str_daily_schedule_summary()}\n"
+          ret_str += f"---\n"
+
+      elif ("print hourly org persona schedule"
+            in sim_command.lower()):
+        ret_str += (self.personas[" ".join(sim_command.split()[-2:])]
+                    .scratch.get_str_daily_schedule_hourly_org_summary())
+
+      elif ("print persona current tile"
+            in sim_command[:26].lower()):
+        ret_str += str(self.personas[" ".join(sim_command.split()[-2:])]
+                    .scratch.curr_tile)
+
+      elif ("print persona chatting with buffer"
+            in sim_command.lower()):
+        curr_persona = self.personas[" ".join(sim_command.split()[-2:])]
+        for p_n, count in curr_persona.scratch.chatting_with_buffer.items():
+          ret_str += f"{p_n}: {count}"
+
+      elif ("print persona associative memory (event)"
+            in sim_command.lower()):
+        ret_str += f'{self.personas[" ".join(sim_command.split()[-2:])]}\n'
+        ret_str += (self.personas[" ".join(sim_command.split()[-2:])]
+                                     .a_mem.get_str_seq_events())
+
+      elif ("print persona associative memory (thought)"
+            in sim_command.lower()):
+        ret_str += f'{self.personas[" ".join(sim_command.split()[-2:])]}\n'
+        ret_str += (self.personas[" ".join(sim_command.split()[-2:])]
+                                     .a_mem.get_str_seq_thoughts())
+
+      elif ("print persona associative memory (chat)"
+            in sim_command.lower()):
+        ret_str += f'{self.personas[" ".join(sim_command.split()[-2:])]}\n'
+        ret_str += (self.personas[" ".join(sim_command.split()[-2:])]
+                                     .a_mem.get_str_seq_chats())
+
+      elif ("print persona spatial memory"
+            in sim_command.lower()):
+        self.personas[" ".join(sim_command.split()[-2:])].s_mem.print_tree()
+        ret_str += "Printed persona spatial memory to backend console."
+
+      elif ("print current time"
+            in sim_command[:18].lower()):
+        ret_str += f'{self.curr_time.strftime("%B %d, %Y, %H:%M:%S")}\n'
+        ret_str += f'steps: {self.step}'
+
+      elif ("print tile event"
+            in sim_command[:16].lower()):
+        cooordinate = [int(i.strip()) for i in sim_command[16:].split(",")]
+        for i in self.maze.access_tile(cooordinate)["events"]:
+          ret_str += f"{i}\n"
+
+      elif ("print tile details"
+            in sim_command.lower()):
+        cooordinate = [int(i.strip()) for i in sim_command[18:].split(",")]
+        for key, val in self.maze.access_tile(cooordinate).items():
+          ret_str += f"{key}: {val}\n"
+
+      elif ("call -- analysis"
+            in sim_command.lower()):
+        persona_name = sim_command[len("call -- analysis"):].strip()
+        self.personas[persona_name].open_convo_session("analysis")
+        ret_str += f"Opened analysis session for {persona_name}."
+
+      elif ("call -- load history"
+            in sim_command.lower()):
+        curr_file = maze_assets_loc + "/" + sim_command[len("call -- load history"):].strip()
+        rows = read_file_to_list(curr_file, header=True, strip_trail=True)[1]
+        clean_whispers = []
+        for row in rows:
+          agent_name = row[0].strip()
+          whispers = row[1].split(";")
+          whispers = [whisper.strip() for whisper in whispers]
+          for whisper in whispers:
+            clean_whispers += [[agent_name, whisper]]
+
+        load_history_via_whisper(self.personas, clean_whispers)
+        ret_str += f"Loaded history from {curr_file}."
+
+      else:
+        raise ValueError(f"Unknown command: {sim_command}")
+
+      result = {
+        "sim_code": self.sim_code,
+        "command_id": command_id,
+        "command": sim_command,
+        "source": source,
+        "state": "completed",
+        "output": ret_str,
+        "error": None,
+        "created_at": created_at or self._now_iso(),
+        "completed_at": self._now_iso(),
+      }
+      self._write_command_result(result)
+      return {
+        "should_exit": should_exit,
+        "output": ret_str,
+        "error": None,
+      }
+
+    except Exception as exc:
+      traceback_str = traceback.format_exc()
+      result = {
+        "sim_code": self.sim_code,
+        "command_id": command_id,
+        "command": sim_command,
+        "source": source,
+        "state": "failed",
+        "output": "",
+        "error": f"{type(exc).__name__}: {exc}",
+        "traceback": traceback_str,
+        "created_at": created_at or self._now_iso(),
+        "completed_at": self._now_iso(),
+      }
+      self._write_command_result(result)
+      return {
+        "should_exit": False,
+        "output": "",
+        "error": traceback_str,
+      }
 
 
   def _start_background_run(self, requested_steps):
@@ -872,6 +1320,7 @@ class ReverieServer:
               current_prompt_type=None,
             )
           curr_move_file = f"{sim_folder}/movement/{self.step}.json"
+          os.makedirs(os.path.dirname(curr_move_file), exist_ok=True)
           with open(curr_move_file, "w") as outfile: 
             outfile.write(json.dumps(movements, indent=2))
 
@@ -919,191 +1368,38 @@ class ReverieServer:
     print ("constructs powered by generative agents architecture and LLM. We")
     print ("clarify that these agents lack human-like agency, consciousness,")
     print ("and independent decision-making.\n---")
+    self._start_stdin_reader()
 
-    # <sim_folder> points to the current simulation folder.
-    sim_folder = f"{fs_storage}/{self.sim_code}"
+    while True:
+      command_payload = self._get_next_command()
+      if not command_payload:
+        time.sleep(self.server_sleep)
+        continue
 
-    while True: 
-      sim_command = input("Enter option: ")
-      sim_command = sim_command.strip()
-      ret_str = ""
-      command_lower = sim_command.lower()
+      sim_command = str(command_payload.get("command", "")).strip()
+      source = command_payload.get("source", "terminal")
+      command_id = command_payload.get("command_id")
+      created_at = command_payload.get("created_at")
 
-      try: 
-        if command_lower in ["status", "jobs"]:
-          ret_str += self._format_run_status()
+      if source == "web":
+        print(f"[web-command] received command_id={command_id} command={sim_command}")
 
-        elif command_lower == "stop":
-          ret_str += self._request_stop_for_active_job()
+      result = self._execute_server_command(
+        sim_command,
+        source=source,
+        command_id=command_id,
+        created_at=created_at,
+      )
 
-        elif self._has_active_run_job():
-          ret_str += (
-            "A background run job is active. "
-            "Only 'status', 'jobs', and 'stop' are available until it finishes."
-          )
+      if result["error"]:
+        print(result["error"])
+        print("Error.")
+      elif result["output"]:
+        print(result["output"])
 
-        elif command_lower in ["f", "fin", "finish", "save and finish"]: 
-          # Finishes the simulation environment and saves the progress. 
-          # Example: fin
-          self.save()
-          break
-
-        elif command_lower == "start path tester mode": 
-          # Starts the path tester and removes the currently forked sim files.
-          # Note that once you start this mode, you need to exit out of the
-          # session and restart in case you want to run something else. 
-          shutil.rmtree(sim_folder) 
-          self.start_path_tester_server()
-
-        elif command_lower == "exit": 
-          # Finishes the simulation environment but does not save the progress
-          # and erases all saved data from current simulation. 
-          # Example: exit 
-          shutil.rmtree(sim_folder) 
-          break 
-
-        elif command_lower == "save": 
-          # Saves the current simulation progress. 
-          # Example: save
-          self.save()
-
-        elif sim_command[:3].lower() == "run":
-          parts = sim_command.split()
-          if len(parts) != 2:
-            raise ValueError("Usage: run <positive-step-count>")
-          int_count = int(parts[-1])
-          _, message = self._start_background_run(int_count)
-          ret_str += message
-
-        elif ("print persona schedule" 
-              in sim_command[:22].lower()): 
-          # Print the decomposed schedule of the persona specified in the 
-          # prompt.
-          # Example: print persona schedule Isabella Rodriguez
-          ret_str += (self.personas[" ".join(sim_command.split()[-2:])]
-                      .scratch.get_str_daily_schedule_summary())
-
-        elif ("print all persona schedule" 
-              in sim_command[:26].lower()): 
-          # Print the decomposed schedule of all personas in the world. 
-          # Example: print all persona schedule
-          for persona_name, persona in self.personas.items(): 
-            ret_str += f"{persona_name}\n"
-            ret_str += f"{persona.scratch.get_str_daily_schedule_summary()}\n"
-            ret_str += f"---\n"
-
-        elif ("print hourly org persona schedule" 
-              in sim_command.lower()): 
-          # Print the hourly schedule of the persona specified in the prompt.
-          # This one shows the original, non-decomposed version of the 
-          # schedule.
-          # Ex: print persona schedule Isabella Rodriguez
-          ret_str += (self.personas[" ".join(sim_command.split()[-2:])]
-                      .scratch.get_str_daily_schedule_hourly_org_summary())
-
-        elif ("print persona current tile" 
-              in sim_command[:26].lower()): 
-          # Print the x y tile coordinate of the persona specified in the 
-          # prompt. 
-          # Ex: print persona current tile Isabella Rodriguez
-          ret_str += str(self.personas[" ".join(sim_command.split()[-2:])]
-                      .scratch.curr_tile)
-
-        elif ("print persona chatting with buffer" 
-              in sim_command.lower()): 
-          # Print the chatting with buffer of the persona specified in the 
-          # prompt.
-          # Ex: print persona chatting with buffer Isabella Rodriguez
-          curr_persona = self.personas[" ".join(sim_command.split()[-2:])]
-          for p_n, count in curr_persona.scratch.chatting_with_buffer.items(): 
-            ret_str += f"{p_n}: {count}"
-
-        elif ("print persona associative memory (event)" 
-              in sim_command.lower()):
-          # Print the associative memory (event) of the persona specified in
-          # the prompt
-          # Ex: print persona associative memory (event) Isabella Rodriguez
-          ret_str += f'{self.personas[" ".join(sim_command.split()[-2:])]}\n'
-          ret_str += (self.personas[" ".join(sim_command.split()[-2:])]
-                                       .a_mem.get_str_seq_events())
-
-        elif ("print persona associative memory (thought)" 
-              in sim_command.lower()): 
-          # Print the associative memory (thought) of the persona specified in
-          # the prompt
-          # Ex: print persona associative memory (thought) Isabella Rodriguez
-          ret_str += f'{self.personas[" ".join(sim_command.split()[-2:])]}\n'
-          ret_str += (self.personas[" ".join(sim_command.split()[-2:])]
-                                       .a_mem.get_str_seq_thoughts())
-
-        elif ("print persona associative memory (chat)" 
-              in sim_command.lower()): 
-          # Print the associative memory (chat) of the persona specified in
-          # the prompt
-          # Ex: print persona associative memory (chat) Isabella Rodriguez
-          ret_str += f'{self.personas[" ".join(sim_command.split()[-2:])]}\n'
-          ret_str += (self.personas[" ".join(sim_command.split()[-2:])]
-                                       .a_mem.get_str_seq_chats())
-
-        elif ("print persona spatial memory" 
-              in sim_command.lower()): 
-          # Print the spatial memory of the persona specified in the prompt
-          # Ex: print persona spatial memory Isabella Rodriguez
-          self.personas[" ".join(sim_command.split()[-2:])].s_mem.print_tree()
-
-        elif ("print current time" 
-              in sim_command[:18].lower()): 
-          # Print the current time of the world. 
-          # Ex: print current time
-          ret_str += f'{self.curr_time.strftime("%B %d, %Y, %H:%M:%S")}\n'
-          ret_str += f'steps: {self.step}'
-
-        elif ("print tile event" 
-              in sim_command[:16].lower()): 
-          # Print the tile events in the tile specified in the prompt 
-          # Ex: print tile event 50, 30
-          cooordinate = [int(i.strip()) for i in sim_command[16:].split(",")]
-          for i in self.maze.access_tile(cooordinate)["events"]: 
-            ret_str += f"{i}\n"
-
-        elif ("print tile details" 
-              in sim_command.lower()): 
-          # Print the tile details of the tile specified in the prompt 
-          # Ex: print tile event 50, 30
-          cooordinate = [int(i.strip()) for i in sim_command[18:].split(",")]
-          for key, val in self.maze.access_tile(cooordinate).items(): 
-            ret_str += f"{key}: {val}\n"
-
-        elif ("call -- analysis" 
-              in sim_command.lower()): 
-          # Starts a stateless chat session with the agent. It does not save 
-          # anything to the agent's memory. 
-          # Ex: call -- analysis Isabella Rodriguez
-          persona_name = sim_command[len("call -- analysis"):].strip() 
-          self.personas[persona_name].open_convo_session("analysis")
-
-        elif ("call -- load history" 
-              in sim_command.lower()): 
-          curr_file = maze_assets_loc + "/" + sim_command[len("call -- load history"):].strip() 
-          # call -- load history the_ville/agent_history_init_n3.csv
-
-          rows = read_file_to_list(curr_file, header=True, strip_trail=True)[1]
-          clean_whispers = []
-          for row in rows: 
-            agent_name = row[0].strip() 
-            whispers = row[1].split(";")
-            whispers = [whisper.strip() for whisper in whispers]
-            for whisper in whispers: 
-              clean_whispers += [[agent_name, whisper]]
-
-          load_history_via_whisper(self.personas, clean_whispers)
-
-        print (ret_str)
-
-      except:
-        traceback.print_exc()
-        print ("Error.")
-        pass
+      if result["should_exit"]:
+        self._server_exit_requested = True
+        break
 
 
 if __name__ == '__main__':
@@ -1133,11 +1429,6 @@ if __name__ == '__main__':
 
   rs = ReverieServer(origin, target)
   rs.open_server()
-
-
-
-
-
 
 
 

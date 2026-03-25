@@ -25,6 +25,15 @@ def _resolve_address_key(plan, address_tiles):
   return None
 
 
+def _normalize_target_tile(maze, target_tile):
+  return maze.find_nearest_standable_tile(
+    target_tile,
+    same_world=True,
+    same_sector=True,
+    same_arena=True,
+    allow_game_object=False)
+
+
 def execute(persona, maze, personas, plan): 
   """
   Given a plan (action's string address), we execute the plan (actually 
@@ -118,6 +127,12 @@ def execute(persona, maze, personas, plan):
     # There are sometimes more than one tile returned from this (e.g., a tabe
     # may stretch many coordinates). So, we sample a few here. And from that 
     # random sample, we will take the closest ones. 
+    normalized_target_tiles = []
+    for i in list(target_tiles):
+      normalized_tile = _normalize_target_tile(maze, i)
+      normalized_target_tiles += [normalized_tile]
+    target_tiles = list(dict.fromkeys(normalized_target_tiles))
+
     if len(target_tiles) < 4: 
       target_tiles = random.sample(list(target_tiles), len(target_tiles))
     else:
@@ -179,7 +194,6 @@ def execute(persona, maze, personas, plan):
 
   execution = ret, persona.scratch.act_pronunciatio, description
   return execution
-
 
 
 
