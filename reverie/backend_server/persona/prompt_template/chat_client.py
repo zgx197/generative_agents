@@ -10,6 +10,7 @@ from persona.prompt_template.ai_observability import (
   AIClientError,
   build_request_audit_payload,
   classify_transport_error,
+  emit_ai_request_progress,
   preview_text,
   wrap_parse_error,
   write_audit_event,
@@ -77,8 +78,21 @@ class ChatClient:
       print(f"[ChatClient] provider={self.provider} model={request_model} url={url}")
 
     try:
+      emit_ai_request_progress(
+        "request_start",
+        provider=self.provider,
+        operation="chat_completion",
+        model=request_model,
+      )
       data = self._post_json(url, payload)
     except AIClientError as error:
+      emit_ai_request_progress(
+        "request_error",
+        provider=self.provider,
+        operation="chat_completion",
+        model=request_model,
+        error=str(error),
+      )
       self._write_audit(
         request_model,
         url,
@@ -87,6 +101,13 @@ class ChatClient:
         error=error,
       )
       raise
+    finally:
+      emit_ai_request_progress(
+        "request_end",
+        provider=self.provider,
+        operation="chat_completion",
+        model=request_model,
+      )
 
     try:
       message = data["choices"][0]["message"]["content"]

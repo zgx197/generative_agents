@@ -10,6 +10,7 @@ from persona.prompt_template.ai_observability import (
   AIClientError,
   build_request_audit_payload,
   classify_transport_error,
+  emit_ai_request_progress,
   preview_text,
   wrap_parse_error,
   write_audit_event,
@@ -73,9 +74,22 @@ class EmbeddingClient:
       print(f"[EmbeddingClient] provider={self.provider} model={request_model} url={url} count={len(texts)}")
 
     try:
+      emit_ai_request_progress(
+        "request_start",
+        provider=self.provider,
+        operation="embedding",
+        model=request_model,
+      )
       data = self._post_json(url, payload)
       vectors = self._parse_vectors(data)
     except AIClientError as error:
+      emit_ai_request_progress(
+        "request_error",
+        provider=self.provider,
+        operation="embedding",
+        model=request_model,
+        error=str(error),
+      )
       self._write_audit(
         request_model,
         url,
@@ -84,6 +98,13 @@ class EmbeddingClient:
         error=error,
       )
       raise
+    finally:
+      emit_ai_request_progress(
+        "request_end",
+        provider=self.provider,
+        operation="embedding",
+        model=request_model,
+      )
 
     response_meta = {
       "vector_count": len(vectors),

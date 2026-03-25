@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-  [ValidateSet("all", "frontend", "backend")]
+  [ValidateSet("all", "frontend", "backend", "backend-runtime")]
   [string]$Target = "all",
   [int]$Lines = 80,
   [switch]$Follow
@@ -42,11 +42,15 @@ switch ($Target) {
   "all" {
     Show-LogTail -Name "frontend" -TailCount $Lines
     Show-LogTail -Name "backend" -TailCount $Lines
+    Show-LogTail -Name "backend.runtime" -TailCount $Lines
   }
   "frontend" {
     Show-LogTail -Name "frontend" -TailCount $Lines -WaitForChanges:$Follow
   }
   "backend" {
     Show-LogTail -Name "backend" -TailCount $Lines -WaitForChanges:$Follow
+  }
+  "backend-runtime" {
+    Show-LogTail -Name "backend.runtime" -TailCount $Lines -WaitForChanges:$Follow
   }
 }

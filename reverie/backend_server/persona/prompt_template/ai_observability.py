@@ -5,11 +5,15 @@ import datetime
 import json
 import os
 import socket
+import threading
 import urllib.error
 from pathlib import Path
 from typing import Any, Optional
 
 from utils import *
+
+
+_request_progress_local = threading.local()
 
 
 class AIClientError(RuntimeError):
@@ -236,3 +240,22 @@ def build_request_audit_payload(*,
 
 def preview_text(value: Any, limit: Optional[int] = None) -> Optional[str]:
   return _truncate_text(value, limit)
+
+
+def set_ai_request_progress_callback(callback) -> None:
+  _request_progress_local.callback = callback
+
+
+def clear_ai_request_progress_callback() -> None:
+  if hasattr(_request_progress_local, "callback"):
+    delattr(_request_progress_local, "callback")
+
+
+def emit_ai_request_progress(event: str, **payload: Any) -> None:
+  callback = getattr(_request_progress_local, "callback", None)
+  if callback is None:
+    return
+  try:
+    callback(event=event, **payload)
+  except Exception:
+    return

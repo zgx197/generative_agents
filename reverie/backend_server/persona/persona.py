@@ -182,7 +182,13 @@ class Persona:
     reflect(self)
 
 
-  def move(self, maze, personas, curr_tile, curr_time):
+  def _report_progress(self, progress_callback, stage):
+    if progress_callback is None:
+      return
+    progress_callback(stage=stage)
+
+
+  def move(self, maze, personas, curr_tile, curr_time, progress_callback=None):
     """
     This is the main cognitive function where our main sequence is called. 
 
@@ -217,10 +223,15 @@ class Persona:
     self.scratch.curr_time = curr_time
 
     # Main cognitive sequence begins here. 
+    self._report_progress(progress_callback, "persona.move.perceive")
     perceived = self.perceive(maze)
+    self._report_progress(progress_callback, "persona.move.retrieve")
     retrieved = self.retrieve(perceived)
+    self._report_progress(progress_callback, "persona.move.plan")
     plan = self.plan(maze, personas, new_day, retrieved)
+    self._report_progress(progress_callback, "persona.move.reflect")
     self.reflect()
+    self._report_progress(progress_callback, "persona.move.execute")
 
     # <execution> is a triple set that contains the following components: 
     # <next_tile> is a x,y coordinate. e.g., (58, 9)
@@ -234,7 +245,6 @@ class Persona:
   def open_convo_session(self, convo_mode): 
     open_convo_session(self, convo_mode)
     
-
 
 
 

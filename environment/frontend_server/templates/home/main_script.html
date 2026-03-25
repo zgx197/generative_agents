@@ -149,8 +149,10 @@
 
 		let state = payload.job.state || "idle";
 		let stage = payload.progress.current_stage || "idle";
+		let promptType = payload.progress.current_prompt_type || null;
+		let promptSuffix = promptType ? " Prompt: " + promptType : "";
 		if (state == "running" || state == "queued" || state == "cancelling") {
-			return "Backend worker is active. Current stage: " + stage;
+			return "Backend worker is active. Current stage: " + stage + "." + promptSuffix;
 		}
 		if (state == "failed") {
 			return "The latest run job failed. Check the backend log or the error summary below.";
@@ -181,6 +183,8 @@
 		let world_step = "-";
 		let current_persona = "-";
 		let current_stage = "idle";
+		let current_prompt_type = "-";
+		let current_stage_elapsed = "0s";
 		let stop_requested = "False";
 		let sim_label = sim_code;
 		let updated_at = "-";
@@ -193,6 +197,8 @@
 			world_step = payload.job.current_world_step;
 			current_persona = payload.progress.current_persona || "-";
 			current_stage = payload.progress.current_stage || "idle";
+			current_prompt_type = payload.progress.current_prompt_type || "-";
+			current_stage_elapsed = (payload.progress.current_stage_elapsed_sec || 0) + "s";
 			stop_requested = payload.job.stop_requested ? "True" : "False";
 			sim_label = payload.simulation.sim_code || sim_code;
 			updated_at = payload.job.updated_at || "-";
@@ -221,6 +227,8 @@
 		set_text_content("simulation-status-world-step", world_step);
 		set_text_content("simulation-status-persona", current_persona);
 		set_text_content("simulation-status-stage", current_stage);
+		set_text_content("simulation-status-prompt-type", current_prompt_type);
+		set_text_content("simulation-status-stage-elapsed", current_stage_elapsed);
 		set_text_content("simulation-status-stop-requested", stop_requested);
 		set_text_content("simulation-status-sim", sim_label);
 		set_text_content("simulation-status-updated", updated_at);
@@ -700,8 +708,6 @@
 	var play_button=document.getElementById("play_button");
 	var pause_button=document.getElementById("pause_button");
 </script>
-
-
 
 
 

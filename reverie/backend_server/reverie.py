@@ -41,6 +41,10 @@ from global_methods import *
 from utils import *
 from maze import *
 from persona.persona import *
+from persona.prompt_template.ai_observability import (
+  clear_ai_request_progress_callback,
+  set_ai_request_progress_callback,
+)
 from persona.prompt_template.gpt_structure import *
 
 
@@ -214,6 +218,9 @@ class ReverieServer:
     self.status_file_path = f"{fs_temp_storage}/simulation_status.json"
     self._job_lock = threading.Lock()
     self._worker_thread = None
+    self._job_heartbeat_interval_sec = float(os.getenv("GA_JOB_HEARTBEAT_SEC", "5"))
+    self._job_heartbeat_stop = threading.Event()
+    self._job_heartbeat_thread = None
     self._active_job = None
     self._write_status_file()
 
@@ -245,6 +252,8 @@ class ReverieServer:
         "progress": {
           "current_persona": None,
           "current_stage": "idle",
+          "current_stage_started_at": None,
+          "current_stage_elapsed_sec": 0,
           "current_prompt_type": None,
           "current_time": current_time,
         },
@@ -253,6 +262,21 @@ class ReverieServer:
 
     job = dict(self._active_job)
     last_error = job.get("last_error")
+    stage_started_at = job.get("current_stage_started_at")
+    stage_elapsed_sec = 0
+    if stage_started_at:
+      try:
+        stage_elapsed_sec = max(
+          0,
+          int(
+            (
+              datetime.datetime.now().astimezone()
+              - datetime.datetime.fromisoformat(stage_started_at)
+            ).total_seconds()
+          ),
+        )
+      except ValueError:
+        stage_elapsed_sec = 0
     return {
       "simulation": {
         "sim_code": self.sim_code,
@@ -271,6 +295,8 @@ class ReverieServer:
       "progress": {
         "current_persona": job.get("current_persona"),
         "current_stage": job.get("current_stage", "idle"),
+        "current_stage_started_at": stage_started_at,
+        "current_stage_elapsed_sec": stage_elapsed_sec,
         "current_prompt_type": job.get("current_prompt_type"),
         "current_time": current_time,
       },
@@ -308,16 +334,75 @@ class ReverieServer:
         return
 
       changed = False
+      stage_changed = False
       for key, value in fields.items():
         if self._active_job.get(key) != value:
           self._active_job[key] = value
           changed = True
+          if key in ("current_stage", "current_persona"):
+            stage_changed = True
       if not changed:
         return
+      if stage_changed:
+        self._active_job["current_stage_started_at"] = self._now_iso()
       self._active_job["updated_at"] = self._now_iso()
       snapshot = self._build_status_snapshot_locked()
 
     self._write_status_file(snapshot)
+
+
+  def _touch_active_job(self, job_id=None):
+    with self._job_lock:
+      if self._active_job is None:
+        return None
+      if job_id and self._active_job.get("job_id") != job_id:
+        return None
+
+      self._active_job["updated_at"] = self._now_iso()
+      snapshot = self._build_status_snapshot_locked()
+
+    self._write_status_file(snapshot)
+    return snapshot
+
+
+  def _format_snapshot_short(self, snapshot):
+    job = snapshot.get("job", {})
+    progress = snapshot.get("progress", {})
+    return (
+      f"state={job.get('state')} "
+      f"step={job.get('completed_steps', 0)}/{job.get('requested_steps', 0)} "
+      f"world_step={job.get('current_world_step')} "
+      f"persona={progress.get('current_persona') or '-'} "
+      f"stage={progress.get('current_stage') or '-'} "
+      f"stage_elapsed={progress.get('current_stage_elapsed_sec', 0)}s "
+      f"prompt={progress.get('current_prompt_type') or '-'}"
+    )
+
+
+  def _job_heartbeat_loop(self, job_id):
+    while not self._job_heartbeat_stop.wait(self._job_heartbeat_interval_sec):
+      snapshot = self._touch_active_job(job_id)
+      if snapshot is None:
+        break
+      print(f"[run-job] heartbeat job_id={job_id} {self._format_snapshot_short(snapshot)}")
+
+
+  def _start_job_heartbeat(self, job_id):
+    self._job_heartbeat_stop.clear()
+    self._job_heartbeat_thread = threading.Thread(
+      target=self._job_heartbeat_loop,
+      args=(job_id,),
+      daemon=True,
+      name=f"reverie-heartbeat-{job_id}",
+    )
+    self._job_heartbeat_thread.start()
+
+
+  def _stop_job_heartbeat(self):
+    self._job_heartbeat_stop.set()
+    if self._job_heartbeat_thread and self._job_heartbeat_thread.is_alive():
+      self._job_heartbeat_thread.join(timeout=1)
+    self._job_heartbeat_thread = None
 
 
   def _increment_completed_steps(self, job_id):
@@ -361,6 +446,8 @@ class ReverieServer:
     lines += [f"current time: {progress['current_time']}"]
     lines += [f"current persona: {progress['current_persona'] or '-'}"]
     lines += [f"current stage: {progress['current_stage'] or '-'}"]
+    lines += [f"current stage elapsed sec: {progress.get('current_stage_elapsed_sec', 0)}"]
+    lines += [f"current prompt type: {progress['current_prompt_type'] or '-'}"]
     lines += [f"stop requested: {job['stop_requested']}"]
     lines += [f"job id: {job['job_id'] or '-'}"]
     lines += [f"started at: {job['started_at'] or '-'}"]
@@ -392,6 +479,7 @@ class ReverieServer:
         "current_world_step": self.step,
         "current_persona": None,
         "current_stage": "queued",
+        "current_stage_started_at": self._now_iso(),
         "current_prompt_type": None,
         "started_at": None,
         "updated_at": self._now_iso(),
@@ -429,6 +517,18 @@ class ReverieServer:
 
 
   def _run_background_job(self, job_id, requested_steps):
+    def _ai_request_progress_callback(event, **payload):
+      operation = payload.get("operation")
+      model = payload.get("model")
+      prompt_type = None
+      if operation:
+        prompt_type = operation if not model else f"{operation}:{model}"
+
+      if event == "request_start":
+        self._update_active_job(job_id, current_prompt_type=prompt_type)
+      elif event in ("request_end", "request_error"):
+        self._update_active_job(job_id, current_prompt_type=None)
+
     self._update_active_job(
       job_id,
       state="running",
@@ -440,6 +540,8 @@ class ReverieServer:
       last_error=None,
     )
     print(f"[run-job] started job_id={job_id} requested_steps={requested_steps}")
+    self._start_job_heartbeat(job_id)
+    set_ai_request_progress_callback(_ai_request_progress_callback)
 
     try:
       self.start_server(requested_steps, job_id=job_id)
@@ -470,6 +572,9 @@ class ReverieServer:
         },
       )
       print(f"[run-job] failed job_id={job_id} error={type(exc).__name__}: {exc}")
+    finally:
+      clear_ai_request_progress_callback()
+      self._stop_job_heartbeat()
 
 
   def save(self): 
@@ -713,6 +818,23 @@ class ReverieServer:
                 current_stage="persona.move",
                 current_prompt_type=None,
               )
+              print(
+                f"[run-job] progress job_id={job_id} "
+                f"persona={persona_name} stage=persona.move"
+              )
+
+              def progress_callback(stage, persona_name=persona_name):
+                self._update_active_job(
+                  job_id,
+                  state="running",
+                  current_world_step=self.step,
+                  current_persona=persona_name,
+                  current_stage=stage,
+                )
+                print(
+                  f"[run-job] progress job_id={job_id} "
+                  f"persona={persona_name} stage={stage}"
+                )
             # <next_tile> is a x,y coordinate. e.g., (58, 9)
             # <pronunciatio> is an emoji. e.g., "\ud83d\udca4"
             # <description> is a string description of the movement. e.g., 
@@ -720,7 +842,8 @@ class ReverieServer:
             #   @ double studio:double studio:common room:sofa
             next_tile, pronunciatio, description = persona.move(
               self.maze, self.personas, self.personas_tile[persona_name], 
-              self.curr_time)
+              self.curr_time,
+              progress_callback=progress_callback if job_id else None)
             movements["persona"][persona_name] = {}
             movements["persona"][persona_name]["movement"] = next_tile
             movements["persona"][persona_name]["pronunciatio"] = pronunciatio
@@ -1010,7 +1133,6 @@ if __name__ == '__main__':
 
   rs = ReverieServer(origin, target)
   rs.open_server()
-
 
 
 
